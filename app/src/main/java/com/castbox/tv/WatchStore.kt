@@ -35,17 +35,23 @@ class WatchStore(private val prefs: SharedPreferences) {
         return if (isWatched(key) || p.positionMs < MIN_RESUME_MS) 0L else p.positionMs
     }
 
-    fun save(key: String, positionMs: Long, durationMs: Long) {
-        if (key.isBlank() || durationMs <= 0 || positionMs < 0) return
+    /** Returns true when this save is the one that makes the video count as watched (it wasn't before). */
+    fun save(key: String, positionMs: Long, durationMs: Long): Boolean {
+        if (key.isBlank() || durationMs <= 0 || positionMs < 0) return false
+        val was = isWatched(key)
         map[key] = Progress(positionMs.coerceAtMost(durationMs), durationMs)
         persist()
+        return !was && isWatched(key)
     }
 
-    fun markWatched(key: String) {
-        if (key.isBlank()) return
+    /** Returns true if the video was not already watched. */
+    fun markWatched(key: String): Boolean {
+        if (key.isBlank()) return false
+        val was = isWatched(key)
         val duration = map[key]?.durationMs?.takeIf { it > 0 } ?: 1L
         map[key] = Progress(duration, duration)
         persist()
+        return !was
     }
 
     fun markUnwatched(key: String) {

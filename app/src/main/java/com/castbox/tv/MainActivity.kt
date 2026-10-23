@@ -173,12 +173,16 @@ class MainActivity : ComponentActivity() {
     private var player: ExoPlayer? = null
     private var watchStore: WatchStore? = null
     private var playingKey: String = ""
+    private var playingMovie: Movie? = null
+    private var reporter: WatchReporter? = null
+    @Volatile private var knownServers: List<MediaServer> = emptyList()
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         val prefs = getSharedPreferences("castbox", MODE_PRIVATE)
         val watch = WatchStore(prefs).also { watchStore = it }
         val posters = PosterRepo(prefs)
+        val report = WatchReporter(prefs, lifecycleScope) { id -> knownServers.firstOrNull { it.serverId == id }?.baseUrl }.also { reporter = it }
         val savedServers = runCatching {
             val legacy = prefs.getString("server", null)
             val savedJson = prefs.getString("servers", null) ?: if (!legacy.isNullOrBlank()) {
@@ -191,6 +195,8 @@ class MainActivity : ComponentActivity() {
                 if (url.startsWith("http://") || url.startsWith("https://")) MediaServer(o.optString("name", "Media PC").ifBlank { "Media PC" }, url, o.optString("id")) else null
             }
         }.getOrDefault(emptyList())
+        knownServers = savedServers
+        report.flushSoon()
         setContent {
             var servers by remember { mutableStateOf(savedServers) }
             var movies by remember { mutableStateOf<List<Movie>>(emptyList()) }
@@ -207,6 +213,7 @@ class MainActivity : ComponentActivity() {
 
             fun persistServers(updated: List<MediaServer>) {
                 servers = updated
+                knownServers = updated
                 val arr = JSONArray()
                 updated.forEach { server -> arr.put(JSONObject().put("name", server.name).put("url", server.baseUrl).put("id", server.serverId)) }
                 prefs.edit().putString("servers", arr.toString()).apply()
@@ -221,13 +228,14 @@ class MainActivity : ComponentActivity() {
                 if (selected != null) {
                     PlaybackScreen(
                         movie = selected!!,
-                        watch = watch,
-                        onBack = { player?.stop(); playingKey = ""; selected = null },
+                        watch = watch, report = report,
+                        onBack = { player?.stop(); playingKey = ""; playingMovie = null; selected = null },
                         getPlayer = { movie ->
                             player?.release()
                             ExoPlayer.Builder(this, CastBoxRenderersFactory(this)).build().also { p ->
                                 player = p
                                 playingKey = movie.watchKey
+                                playingMovie = movie
                                 // Pick up where the user left off if they backed out earlier.
                                 p.setMediaItem(MediaItem.fromUri(Uri.parse(movie.url)), watch.resumePosition(movie.watchKey))
                                 p.prepare()
@@ -273,7 +281,7 @@ class MainActivity : ComponentActivity() {
                 } else {
                     LibraryScreen(
                         server = servers.joinToString(" · ") { it.name }, movies = movies, tree = tree,
-                        watch = watch, posters = posters,
+                        watch = watch, posters = posters, report = report,
                         query = searchQuery, onQueryChange = { searchQuery = it },
                         openFolders = openFolders, onOpenFoldersChange = { openFolders = it },
                         lastPlayedId = lastPlayedId,
@@ -302,7 +310,10 @@ class MainActivity : ComponentActivity() {
 
     override fun onStop() {
         // Save progress before the player is released (the app can be left mid-video via Home or sleep).
-        player?.let { p -> watchStore?.save(playingKey, p.currentPosition, p.duration.takeIf { it != C.TIME_UNSET } ?: 0L) }
+        player?.let { p ->
+            val finished = watchStore?.save(playingKey, p.currentPosition, p.duration.takeIf { it != C.TIME_UNSET } ?: 0L) == true
+            if (finished) playingMovie?.let { reporter?.completed(it) }
+        }
         player?.release()
         player = null
         super.onStop()
@@ -585,7 +596,7 @@ private fun ConnectScreen(
 
 @Composable
 private fun LibraryScreen(
-    server: String, movies: List<Movie>, tree: FolderNode, watch: WatchStore, posters: PosterRepo,
+    server: String, movies: List<Movie>, tree: FolderNode, watch: WatchStore, posters: PosterRepo, report: WatchReporter,
     query: String, onQueryChange: (String) -> Unit,
     openFolders: List<List<String>>, onOpenFoldersChange: (List<List<String>>) -> Unit,
     lastPlayedId: String,
@@ -653,7 +664,7 @@ private fun LibraryScreen(
                     items(filtered, key = { it.id }) { movie ->
                         MovieRow(
                             movie = movie, progress = watch.progress(movie.watchKey), watched = watch.isWatched(movie.watchKey),
-                            onClick = { onPlay(movie) }, onToggleWatched = { toggleWatched(watch, listOf(movie)) },
+                            onClick = { onPlay(movie) }, onToggleWatched = { toggleWatched(watch, report, listOf(movie)) },
                             modifier = if (movie === target) Modifier.focusRequester(firstItem) else Modifier
                         )
                     }
@@ -666,13 +677,13 @@ private fun LibraryScreen(
                             posterUrl = posters.posterFor(entry.segments.last()),
                             modifier = if (isFolderFocusTarget(entry, folders, path, returnedFrom, current, lastPlayedId)) Modifier.focusRequester(firstItem) else Modifier,
                             onClick = { onOpenFoldersChange(stack + listOf(path + entry.segments)) },
-                            onToggleWatched = { toggleWatched(watch, inside) }
+                            onToggleWatched = { toggleWatched(watch, report, inside) }
                         )
                     }
                     items(current.movies, key = { it.id }) { movie ->
                         MovieRow(
                             movie = movie, progress = watch.progress(movie.watchKey), watched = watch.isWatched(movie.watchKey),
-                            onClick = { onPlay(movie) }, onToggleWatched = { toggleWatched(watch, listOf(movie)) },
+                            onClick = { onPlay(movie) }, onToggleWatched = { toggleWatched(watch, report, listOf(movie)) },
                             modifier = if (movie.id == lastPlayedId || (folders.isEmpty() && movie === current.movies.first() && current.movies.none { it.id == lastPlayedId })) Modifier.focusRequester(firstItem) else Modifier
                         )
                     }
@@ -720,9 +731,10 @@ private fun isFolderFocusTarget(
 }
 
 /** Marks every video in [videos] watched, or clears them all if they already are. */
-private fun toggleWatched(watch: WatchStore, videos: List<Movie>) {
+private fun toggleWatched(watch: WatchStore, report: WatchReporter, videos: List<Movie>) {
     val allWatched = videos.isNotEmpty() && videos.all { watch.isWatched(it.watchKey) }
-    videos.forEach { if (allWatched) watch.markUnwatched(it.watchKey) else watch.markWatched(it.watchKey) }
+    // Only marking as watched is reported; un-marking is never sent.
+    videos.forEach { if (allWatched) watch.markUnwatched(it.watchKey) else if (watch.markWatched(it.watchKey)) report.completed(it) }
 }
 
 @Composable
@@ -840,14 +852,14 @@ private const val CONTROLLER_TIMEOUT_MS = 5000
 @androidx.annotation.OptIn(UnstableApi::class)
 @OptIn(UnstableApi::class)
 @Composable
-private fun PlaybackScreen(movie: Movie, watch: WatchStore, onBack: () -> Unit, getPlayer: (Movie) -> ExoPlayer) {
+private fun PlaybackScreen(movie: Movie, watch: WatchStore, report: WatchReporter, onBack: () -> Unit, getPlayer: (Movie) -> ExoPlayer) {
     val player = remember(movie.url) { getPlayer(movie) }
     var playerView by remember { mutableStateOf<PlayerView?>(null) }
     var playbackError by remember { mutableStateOf<String?>(null) }
 
     fun saveProgress() {
         val duration = player.duration
-        if (duration != C.TIME_UNSET) watch.save(movie.watchKey, player.currentPosition, duration)
+        if (duration != C.TIME_UNSET && watch.save(movie.watchKey, player.currentPosition, duration)) report.completed(movie)
     }
 
     // Save on the way out, so backing out by mistake doesn't lose the place.
@@ -866,7 +878,7 @@ private fun PlaybackScreen(movie: Movie, watch: WatchStore, onBack: () -> Unit, 
                 if (error == null) playbackError = null
             }
             override fun onPlaybackStateChanged(state: Int) {
-                if (state == Player.STATE_ENDED) watch.markWatched(movie.watchKey)
+                if (state == Player.STATE_ENDED && watch.markWatched(movie.watchKey)) report.completed(movie)
             }
         }
         player.addListener(listener)

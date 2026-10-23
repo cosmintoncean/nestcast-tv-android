@@ -12,8 +12,8 @@ android {
         applicationId = "com.castbox.tv"
         minSdk = 23
         targetSdk = 28
-        versionCode = 2
-        versionName = "0.3.0"
+        versionCode = 3
+        versionName = "0.4.0"
         // TV devices are ARM; skipping x86 keeps the FFmpeg native libraries from bloating the APK.
         ndk { abiFilters += listOf("armeabi-v7a", "arm64-v8a") }
     }
