@@ -17,6 +17,9 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.Refresh
@@ -320,8 +323,20 @@ private fun ServerSourcesScreen(
     onAdd: (String, String) -> Unit, onRemove: (MediaServer) -> Unit,
     onConnect: () -> Unit, onBackToLibrary: () -> Unit
 ) {
-    var name by remember { mutableStateOf("") }
-    var address by remember { mutableStateOf("") }
+    var showAddDialog by remember { mutableStateOf(false) }
+    val primaryAction = remember { FocusRequester() }
+    // Start on the main button; the text fields live in a dialog so they never grab focus or the keyboard.
+    LaunchedEffect(Unit) { runCatching { primaryAction.requestFocus() } }
+    if (showAddDialog) {
+        AddServerDialog(
+            error = error,
+            onDismiss = { showAddDialog = false },
+            onAdd = { name, address ->
+                onAdd(name, address)
+                if (address.trim().startsWith("http")) showAddDialog = false
+            }
+        )
+    }
     Column(
         Modifier.fillMaxSize().background(Bg).verticalScroll(rememberScrollState()).padding(horizontal = 48.dp, vertical = 28.dp),
         verticalArrangement = Arrangement.spacedBy(16.dp)
@@ -332,7 +347,7 @@ private fun ServerSourcesScreen(
         Button(
             onClick = onConnect,
             enabled = !loading && servers.isNotEmpty(),
-            modifier = Modifier.height(54.dp)
+            modifier = Modifier.height(54.dp).focusRequester(primaryAction)
         ) {
             if (loading) {
                 CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp, color = Color.Black)
@@ -341,21 +356,14 @@ private fun ServerSourcesScreen(
             Text(if (loading) "Connecting to unified library…" else "Open unified library", fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
         }
         if (servers.isEmpty()) {
-            Text("Add a PC below to get started. Once at least one PC is configured, this button opens the unified library.", color = Muted, fontSize = 14.sp)
+            Text("Add a PC to get started. Once at least one PC is configured, the button above opens the unified library.", color = Muted, fontSize = 14.sp)
         }
-        Surface(color = Panel, shape = RoundedCornerShape(16.dp), modifier = Modifier.fillMaxWidth().widthIn(max = 850.dp)) {
-            Column(Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                Text("Add a media server", fontWeight = FontWeight.SemiBold, fontSize = 18.sp)
-                OutlinedTextField(value = name, onValueChange = { name = it }, singleLine = true, label = { Text("PC name (e.g. Living Room PC)") }, modifier = Modifier.fillMaxWidth())
-                OutlinedTextField(value = address, onValueChange = { address = it }, singleLine = true, label = { Text("Server URL") }, placeholder = { Text("http://192.168.1.25:5078") }, modifier = Modifier.fillMaxWidth())
-                Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                    Button(onClick = { onAdd(name, address); if (address.trim().startsWith("http")) { name = ""; address = "" } }) { Text("Add PC") }
-                    if (servers.isNotEmpty()) OutlinedButton(onClick = onBackToLibrary) { Text("Cancel") }
-                }
-                if (error.isNotBlank()) Text(error, color = Color(0xFFFFB4A8), fontSize = 14.sp)
-            }
+        Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+            OutlinedButton(onClick = { showAddDialog = true }) { Text("Add PC") }
+            if (servers.isNotEmpty()) OutlinedButton(onClick = onBackToLibrary) { Text("Cancel") }
         }
-        Text("Configured PCs (${servers.size})", fontSize = 20.sp, fontWeight = FontWeight.SemiBold)
+        if (error.isNotBlank() && !showAddDialog) Text(error, color = Color(0xFFFFB4A8), fontSize = 14.sp)
+        Text("Configured PCs (${servers.size})", fontSize = 20.sp, fontWeight = FontWeight.SemiBold, color = Color.White)
         if (servers.isEmpty()) Text("No PCs added yet.", color = Muted)
         servers.forEach { server ->
             Surface(color = Panel, shape = RoundedCornerShape(12.dp), modifier = Modifier.fillMaxWidth().widthIn(max = 850.dp)) {
@@ -369,6 +377,47 @@ private fun ServerSourcesScreen(
             }
         }
     }
+}
+
+/** Name + URL entry in a dialog, so the on-screen keyboard only appears when the user chooses to add a PC. */
+@Composable
+private fun AddServerDialog(error: String, onDismiss: () -> Unit, onAdd: (String, String) -> Unit) {
+    var name by remember { mutableStateOf("") }
+    var address by remember { mutableStateOf("") }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Add a media PC") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                OutlinedTextField(value = name, onValueChange = { name = it }, singleLine = true, label = { Text("PC name (e.g. Living Room PC)") }, modifier = Modifier.fillMaxWidth())
+                OutlinedTextField(value = address, onValueChange = { address = it }, singleLine = true, label = { Text("Server URL") }, placeholder = { Text("http://192.168.1.25:5078") }, modifier = Modifier.fillMaxWidth())
+                if (error.isNotBlank()) Text(error, color = Color(0xFFFFB4A8), fontSize = 14.sp)
+            }
+        },
+        confirmButton = { TextButton(onClick = { onAdd(name, address) }) { Text("Add") } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } }
+    )
+}
+
+/** Search text entry in a dialog; the library list keeps focus until the user asks to search. */
+@Composable
+private fun SearchDialog(query: String, onQueryChange: (String) -> Unit, onClose: () -> Unit) {
+    val field = remember { FocusRequester() }
+    LaunchedEffect(Unit) { runCatching { field.requestFocus() } }
+    AlertDialog(
+        onDismissRequest = onClose,
+        title = { Text("Search videos") },
+        text = {
+            OutlinedTextField(
+                value = query, onValueChange = onQueryChange, singleLine = true,
+                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
+                keyboardActions = KeyboardActions(onSearch = { onClose() }),
+                modifier = Modifier.fillMaxWidth().focusRequester(field)
+            )
+        },
+        confirmButton = { TextButton(onClick = onClose) { Text("Done") } },
+        dismissButton = { TextButton(onClick = { onQueryChange(""); onClose() }) { Text("Clear") } }
+    )
 }
 
 @Composable
@@ -429,10 +478,12 @@ private fun LibraryScreen(
         if (!searching) emptyList()
         else movies.filter { it.title.contains(query, ignoreCase = true) || it.fileName.contains(query, ignoreCase = true) }
     }
-    val focusManager = LocalFocusManager.current
+    var searchOpen by remember { mutableStateOf(false) }
     val firstItem = remember { FocusRequester() }
 
-    BackHandler(enabled = !searching && stack.size > 1) { stack = stack.dropLast(1) }
+    if (searchOpen) SearchDialog(query = query, onQueryChange = { query = it }, onClose = { searchOpen = false })
+    // Back clears an active search first, then climbs out of folders.
+    BackHandler(enabled = searching || stack.size > 1) { if (searching) query = "" else stack = stack.dropLast(1) }
     // Rows from the previous folder leave composition, so hand focus to the first row of the new one.
     LaunchedEffect(tree, path, searching, loading) {
         if (!loading) runCatching { firstItem.requestFocus() }
@@ -446,22 +497,14 @@ private fun LibraryScreen(
                 val where = if (searching) "Search results" else if (path.isEmpty()) server else path.joinToString("  ›  ")
                 Text("${movies.size} videos  •  $where", color = Muted, fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
             }
+            TvActionButton(if (searching) "Search: $query" else "Search", onClick = { searchOpen = true })
+            Spacer(Modifier.width(10.dp))
             TvActionButton("Refresh", onClick = onRefresh, enabled = !loading)
             Spacer(Modifier.width(10.dp))
             TvActionButton("Change server", onClick = onBackToConnect)
         }
         Spacer(Modifier.height(16.dp))
         if (error.isNotBlank()) Text(error, color = Color(0xFFFFB4A8), modifier = Modifier.padding(bottom = 10.dp))
-        OutlinedTextField(
-            value = query, onValueChange = { query = it }, singleLine = true, label = { Text("Search movies") },
-            modifier = Modifier.fillMaxWidth(0.62f).onPreviewKeyEvent { event ->
-                // A text field swallows Up/Down on TV remotes; pass them on so focus can leave the field.
-                if (event.type == KeyEventType.KeyDown && event.key == Key.DirectionDown) { focusManager.moveFocus(FocusDirection.Down); true }
-                else if (event.type == KeyEventType.KeyDown && event.key == Key.DirectionUp) { focusManager.moveFocus(FocusDirection.Up); true }
-                else false
-            }
-        )
-        Spacer(Modifier.height(12.dp))
         val empty = if (searching) filtered.isEmpty() else folders.isEmpty() && current.movies.isEmpty()
         when {
             loading -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { CircularProgressIndicator(color = Accent) }
