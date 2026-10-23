@@ -71,7 +71,8 @@ import org.json.JSONObject
 import java.net.HttpURLConnection
 import java.net.URL
 
-data class MediaServer(val name: String, val baseUrl: String)
+/** [serverId] is the PC's permanent ID from /api/health (servers 0.1.6+); blank for older servers. */
+data class MediaServer(val name: String, val baseUrl: String, val serverId: String = "")
 
 data class Movie(
     val id: String,
@@ -174,7 +175,7 @@ class MainActivity : ComponentActivity() {
             (0 until arr.length()).mapNotNull { i ->
                 val o = arr.optJSONObject(i) ?: return@mapNotNull null
                 val url = o.optString("url").trim().trimEnd('/')
-                if (url.startsWith("http://") || url.startsWith("https://")) MediaServer(o.optString("name", "Media PC").ifBlank { "Media PC" }, url) else null
+                if (url.startsWith("http://") || url.startsWith("https://")) MediaServer(o.optString("name", "Media PC").ifBlank { "Media PC" }, url, o.optString("id")) else null
             }
         }.getOrDefault(emptyList())
         setContent {
@@ -190,7 +191,7 @@ class MainActivity : ComponentActivity() {
             fun persistServers(updated: List<MediaServer>) {
                 servers = updated
                 val arr = JSONArray()
-                updated.forEach { server -> arr.put(JSONObject().put("name", server.name).put("url", server.baseUrl)) }
+                updated.forEach { server -> arr.put(JSONObject().put("name", server.name).put("url", server.baseUrl).put("id", server.serverId)) }
                 prefs.edit().putString("servers", arr.toString()).apply()
             }
 
@@ -233,11 +234,13 @@ class MainActivity : ComponentActivity() {
                                 lifecycleScope.launch {
                                     try {
                                         val result = loadLibraries(servers)
+                                        if (result.servers != servers) persistServers(result.servers)
                                         if (!result.anySuccess) {
-                                            error = result.errors
+                                            error = listOf(result.errors, result.notes).filter { it.isNotBlank() }.joinToString("\n")
                                         } else {
                                             movies = result.movies; tree = result.tree
-                                            error = if (result.failed.isNotEmpty()) "Connected to ${servers.size - result.failed.size} of ${servers.size} PCs. Unavailable: ${result.failed.joinToString { it.name }}." else ""
+                                            val unavailable = if (result.failed.isNotEmpty()) "Connected to ${servers.size - result.failed.size} of ${servers.size} PCs. Unavailable: ${result.failed.joinToString { it.name }}." else ""
+                                            error = listOf(unavailable, result.notes).filter { it.isNotBlank() }.joinToString(" ")
                                             isConnected = true; manageSources = false
                                         }
                                     } finally { loading = false }
@@ -256,8 +259,10 @@ class MainActivity : ComponentActivity() {
                             lifecycleScope.launch {
                                 try {
                                     val result = loadLibraries(servers)
+                                    if (result.servers != servers) persistServers(result.servers)
                                     movies = result.movies; tree = result.tree
-                                    error = if (result.failed.isNotEmpty()) "Unavailable sources: ${result.failed.joinToString { it.name }}" else if (movies.isEmpty()) "No videos found. Check the PCs and media folders." else ""
+                                    val problem = if (result.failed.isNotEmpty()) "Unavailable sources: ${result.failed.joinToString { it.name }}" else if (movies.isEmpty()) "No videos found. Check the PCs and media folders." else ""
+                                    error = listOf(problem, result.notes).filter { it.isNotBlank() }.joinToString(" ")
                                 } catch (e: Exception) { error = "Refresh failed: ${e.message ?: "check network"}" }
                                 finally { loading = false }
                             }
@@ -279,14 +284,18 @@ class MainActivity : ComponentActivity() {
 
 private class LibraryResult(
     val movies: List<Movie>, val tree: FolderNode,
-    val failed: List<MediaServer>, val errors: String, val anySuccess: Boolean
+    val failed: List<MediaServer>, val errors: String, val anySuccess: Boolean,
+    /** The servers as they should be saved: addresses and IDs may have been updated. */
+    val servers: List<MediaServer>, val notes: String
 )
 
 /** Fetches every server at the same time so one offline PC doesn't delay the others. */
 private suspend fun loadLibraries(servers: List<MediaServer>): LibraryResult = coroutineScope {
-    val results = servers.map { source ->
+    val results = servers.map { original ->
         async(Dispatchers.IO) {
-            source to runCatching {
+            val (resolved, note) = resolveServer(original)
+            var source = resolved
+            val library = runCatching {
                 fetchLibrary(source.baseUrl).map { movie ->
                     movie.copy(
                         id = "${source.baseUrl}|${movie.id}",
@@ -295,6 +304,9 @@ private suspend fun loadLibraries(servers: List<MediaServer>): LibraryResult = c
                     )
                 }
             }
+            // Remember the PC's ID the first time we reach it so it can be found again if its address changes.
+            if (library.isSuccess && source.serverId.isBlank()) fetchServerId(source.baseUrl)?.let { source = source.copy(serverId = it) }
+            Triple(source, library, note)
         }
     }.awaitAll()
     withContext(Dispatchers.Default) {
@@ -304,16 +316,70 @@ private suspend fun loadLibraries(servers: List<MediaServer>): LibraryResult = c
         LibraryResult(
             movies = movies, tree = buildFolderTree(movies),
             failed = failed.map { it.first },
-            errors = failed.joinToString("\n") { (source, result) -> "${source.name}: ${result.exceptionOrNull()?.message ?: "Connection failed"}" },
-            anySuccess = good.isNotEmpty()
+            errors = failed.joinToString("\n") { (source, result, _) -> "${source.name}: ${result.exceptionOrNull()?.message ?: "Connection failed"}" },
+            anySuccess = good.isNotEmpty(),
+            servers = results.map { it.first },
+            notes = results.map { it.third }.filter { it.isNotBlank() }.joinToString(" ")
         )
     }
+}
+
+/** The server's permanent ID from /api/health, or null if unreachable or the server predates IDs. */
+private fun fetchServerId(base: String, connectTimeoutMs: Int = 1500): String? = runCatching {
+    val connection = (URL(base.trimEnd('/') + "/api/health").openConnection() as HttpURLConnection).apply {
+        connectTimeout = connectTimeoutMs
+        readTimeout = 2000
+    }
+    try {
+        if (connection.responseCode !in 200..299) null
+        else JSONObject(connection.inputStream.bufferedReader().use { it.readText() }).optString("serverId").ifBlank { null }
+    } finally { connection.disconnect() }
+}.getOrNull()
+
+/**
+ * Makes sure [source]'s saved address still points at that PC. If the PC's ID doesn't answer there (its
+ * network address changed), scans the local network for it and returns the source with the new address.
+ */
+private fun resolveServer(source: MediaServer): Pair<MediaServer, String> {
+    if (source.serverId.isBlank()) return source to ""
+    if (fetchServerId(source.baseUrl, 2000) == source.serverId) return source to ""
+    val port = runCatching { URL(source.baseUrl).port.takeIf { it > 0 } }.getOrNull() ?: 5078
+    val moved = findServerOnLan(source.serverId, port) ?: return source to ""
+    return source.copy(baseUrl = moved) to "${source.name} moved; saved address updated to $moved."
+}
+
+/** The first three octets of this device's LAN address, e.g. "192.168.1.", or null if offline. */
+private fun localSubnetPrefix(): String? = runCatching {
+    java.net.NetworkInterface.getNetworkInterfaces().toList()
+        .filter { it.isUp && !it.isLoopback }
+        .flatMap { it.inetAddresses.toList() }
+        .firstOrNull { it is java.net.Inet4Address && it.isSiteLocalAddress }
+        ?.hostAddress?.substringBeforeLast('.')?.plus(".")
+}.getOrNull()
+
+/** Probes every address on the local /24 for a CastBox server with [serverId]; returns its base URL. */
+private fun findServerOnLan(serverId: String, port: Int): String? {
+    val prefix = localSubnetPrefix() ?: return null
+    val pool = java.util.concurrent.Executors.newFixedThreadPool(48)
+    try {
+        val found = java.util.concurrent.atomic.AtomicReference<String?>(null)
+        val tasks = (1..254).map { host ->
+            java.util.concurrent.Callable {
+                if (found.get() == null) {
+                    val base = "http://$prefix$host:$port"
+                    if (fetchServerId(base, 600) == serverId) found.compareAndSet(null, base)
+                }
+            }
+        }
+        pool.invokeAll(tasks)
+        return found.get()
+    } finally { pool.shutdownNow() }
 }
 
 private fun fetchLibrary(base: String): List<Movie> {
     val url = URL(base.trimEnd('/') + "/api/library")
     val connection = (url.openConnection() as HttpURLConnection).apply {
-        connectTimeout = 5000
+        connectTimeout = 3000
         readTimeout = 15000
         requestMethod = "GET"
     }
