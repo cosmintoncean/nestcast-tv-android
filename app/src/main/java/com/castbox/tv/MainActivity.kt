@@ -625,7 +625,7 @@ private fun LibraryScreen(
             Column(Modifier.weight(1f)) {
                 Text("CASTBOX", color = Accent, fontSize = 14.sp, fontWeight = FontWeight.Bold, letterSpacing = 4.sp)
                 Text("Your movie library", fontSize = 32.sp, fontWeight = FontWeight.Bold, color = Color.White)
-                val where = if (searching) "Search results" else if (path.isEmpty()) server else path.joinToString("  ›  ")
+                val where = if (searching) "Search results" else if (path.isEmpty()) server else path.joinToString("  ›  ") { posters.displayName(it) }
                 val watchedTotal = movies.count { watch.isWatched(it.watchKey) }
                 Text("${movies.size} videos  •  $watchedTotal watched  •  $where", color = Muted, fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 Text("Hold OK on a video or folder to mark it watched or unwatched", color = Muted, fontSize = 11.sp, maxLines = 1)
@@ -661,7 +661,7 @@ private fun LibraryScreen(
                     items(folders, key = { "folder:" + it.segments.joinToString("/") }) { entry ->
                         val inside = entry.node.allMovies()
                         FolderRow(
-                            label = entry.label, count = entry.node.totalMovies,
+                            label = entry.segments.joinToString("  ›  ") { posters.displayName(it) }, count = entry.node.totalMovies,
                             watchedCount = inside.count { watch.isWatched(it.watchKey) },
                             posterUrl = posters.posterFor(entry.segments.last()),
                             modifier = if (isFolderFocusTarget(entry, folders, path, returnedFrom, current, lastPlayedId)) Modifier.focusRequester(firstItem) else Modifier,

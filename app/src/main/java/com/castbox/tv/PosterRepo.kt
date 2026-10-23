@@ -20,8 +20,11 @@ class PosterQuery(val key: String, val title: String, val exactOnly: Boolean)
  * key-less poster source for them, so they keep the plain file-type icon.
  */
 class PosterRepo(private val prefs: SharedPreferences) {
-    // value: poster URL, or "!<epoch ms>" for a lookup that found nothing (retried after a few days)
+    // value: "<poster URL>\t<official show name>", or "!<epoch ms>" for a lookup that found nothing
+    // (retried after a few days)
     private val cache = mutableStateMapOf<String, String>()
+
+    private class Hit(val posterUrl: String, val name: String)
 
     init {
         runCatching {
@@ -33,7 +36,23 @@ class PosterRepo(private val prefs: SharedPreferences) {
     /** The cached poster URL for a folder name, or null if none is known (yet). */
     fun posterFor(folderName: String): String? {
         val query = parse(folderName) ?: return null
-        return cache[query.key]?.takeIf { it.startsWith("http") }
+        return cache[query.key]?.substringBefore('\t')?.takeIf { it.startsWith("http") }
+    }
+
+    /**
+     * A readable name for a folder: the show's real title plus season for TV folders (once looked up; the
+     * cleaned folder name until then), "Title (Year)" for movies, and the original name for anything else.
+     */
+    fun displayName(folderName: String): String {
+        val cleaned = clean(folderName) ?: return folderName
+        val official = parse(folderName)?.let { cache[it.key]?.substringAfter('\t', "")?.ifBlank { null } }
+        return when {
+            cleaned.season != null -> "${official ?: cleaned.title}  ·  Season ${cleaned.season}"
+            cleaned.year != null -> "${cleaned.title} (${cleaned.year})"
+            official != null -> official
+            cleaned.hasTokens -> cleaned.title
+            else -> folderName
+        }
     }
 
     /** Looks up posters for any of [folderNames] not already cached. Safe to call repeatedly. */
@@ -42,7 +61,7 @@ class PosterRepo(private val prefs: SharedPreferences) {
         for (query in pending) {
             val result = withContext(Dispatchers.IO) { runCatching { lookupShow(query) } }
             if (result.isSuccess) {
-                cache[query.key] = result.getOrNull() ?: "!${System.currentTimeMillis()}"
+                cache[query.key] = result.getOrNull()?.let { "${it.posterUrl}\t${it.name}" } ?: "!${System.currentTimeMillis()}"
                 persist()
             }
             delay(REQUEST_GAP_MS) // TVmaze allows about 20 calls per 10 seconds
@@ -51,7 +70,7 @@ class PosterRepo(private val prefs: SharedPreferences) {
 
     private fun needsLookup(value: String?): Boolean = when {
         value == null -> true
-        value.startsWith("http") -> false
+        value.startsWith("http") -> !value.contains('\t') // entries saved before names were stored are looked up again
         else -> System.currentTimeMillis() - (value.removePrefix("!").toLongOrNull() ?: 0L) > RETRY_AFTER_MS
     }
 
@@ -61,7 +80,7 @@ class PosterRepo(private val prefs: SharedPreferences) {
         prefs.edit().putString(PREF_KEY, out.toString()).apply()
     }
 
-    private fun lookupShow(query: PosterQuery): String? {
+    private fun lookupShow(query: PosterQuery): Hit? {
         val url = URL("https://api.tvmaze.com/search/shows?q=" + URLEncoder.encode(query.title, "UTF-8"))
         val connection = (url.openConnection() as HttpURLConnection).apply {
             connectTimeout = 5000
@@ -73,12 +92,14 @@ class PosterRepo(private val prefs: SharedPreferences) {
             if (connection.responseCode !in 200..299) return null
             val results = JSONArray(connection.inputStream.bufferedReader().use { it.readText() })
             val wanted = normalize(query.title)
-            var fallback: String? = null
+            var fallback: Hit? = null
             for (i in 0 until results.length()) {
                 val show = results.getJSONObject(i).optJSONObject("show") ?: continue
+                val name = show.optString("name")
+                if (name.isBlank()) continue
                 val image = show.optJSONObject("image")?.optString("medium")?.takeIf { it.startsWith("http") } ?: continue
-                if (normalize(show.optString("name")) == wanted) return image
-                if (fallback == null) fallback = image
+                if (normalize(name) == wanted) return Hit(image, name)
+                if (fallback == null) fallback = Hit(image, name)
             }
             return if (query.exactOnly) null else fallback
         } finally { connection.disconnect() }
@@ -96,24 +117,29 @@ class PosterRepo(private val prefs: SharedPreferences) {
         private fun normalize(text: String): String =
             text.lowercase().replace("&", "and").filter { it.isLetterOrDigit() }
 
-        /** Null when the name looks like a movie (has a year) or has no usable title. */
-        fun parse(folderName: String): PosterQuery? {
+        private val seasonToken = Regex("(?i)(?<![A-Za-z0-9])S(\\d{1,2})(?:E\\d{1,3})?(?![A-Za-z0-9])")
+
+        /** A folder name split into its title and the season/year it carries; [hasTokens] if quality tags etc. were found. */
+        private class Cleaned(val title: String, val season: Int?, val year: Int?, val hasTokens: Boolean)
+
+        private fun clean(folderName: String): Cleaned? {
             val spaced = folderName.replace('.', ' ').replace('_', ' ')
             val first = tokens.find(spaced)
-            val title: String
-            val exactOnly: Boolean
-            if (first == null) {
-                title = spaced; exactOnly = true            // a plain folder name: accept only an exact title match
-            } else {
-                val token = first.value
-                val isSeason = token[0].equals('S', ignoreCase = true) && token.length > 1 && token[1].isDigit()
-                val isYear = token.length == 4 && token.all { it.isDigit() }
-                if (isYear) return null                      // "Title 2006 ..." is a movie
-                title = spaced.substring(0, first.range.first); exactOnly = !isSeason
-            }
-            val clean = title.trim(' ', '-', '(', '[', '_')
-            if (clean.length < 2) return null
-            return PosterQuery("tv:" + normalize(clean) + if (exactOnly) ":x" else "", clean, exactOnly)
+            val title = spaced.substring(0, first?.range?.first ?: spaced.length)
+                .trim(' ', '-', '(', '[', '_').replace(Regex("\\s+"), " ")
+            if (title.length < 2) return null
+            val season = seasonToken.find(spaced)?.groupValues?.get(1)?.toIntOrNull()
+            // A year only means "movie" when there is no season marker ("Show 2022 S01" is still a show).
+            val year = if (season == null) first?.value?.takeIf { it.length == 4 && it.all(Char::isDigit) }?.toIntOrNull() else null
+            return Cleaned(title, season, year, first != null)
+        }
+
+        /** Null when the name looks like a movie (has a year) or has no usable title. */
+        fun parse(folderName: String): PosterQuery? {
+            val cleaned = clean(folderName) ?: return null
+            if (cleaned.year != null) return null            // "Title 2006 ..." is a movie
+            val exactOnly = cleaned.season == null           // no season marker: accept only an exact title match
+            return PosterQuery("tv:" + normalize(cleaned.title) + if (exactOnly) ":x" else "", cleaned.title, exactOnly)
         }
     }
 }
