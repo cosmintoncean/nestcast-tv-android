@@ -35,7 +35,7 @@ On the PC, check `http://localhost:5078/api/library`. On another device on the s
 ## 2. Build the Android TV app
 
 1. Install Android Studio with Android SDK Platform 35 and a JDK 17 runtime (Android Studio includes a compatible JDK).
-2. Open this folder (`castbox-tv`) as an existing project.
+2. Open this folder (`castbox-tv-android`) as an existing project.
 3. Let Gradle sync and download dependencies.
 4. Use **Build > Build Bundle(s) / APK(s) > Build APK(s)**.
 5. The APK should be at `app/build/outputs/apk/debug/app-debug.apk`.
@@ -65,7 +65,7 @@ The server address is saved on the TV. Press Refresh after adding/removing files
 
 ## Current limitations
 
-- This first TV slice connects to one server. The multi-PC aggregator/discovery service is not implemented yet. Next step is a hub that combines the `/api/library` lists from both PCs and excludes offline sources.
+- The app supports multiple servers (see "Multi-PC library" below), but there is no automatic discovery; server URLs are entered manually.
 - It uses a basic text list, not posters or TMDB metadata yet.
 - Playback depends on the codecs supported by the Android TV device. Many MKV files work when their internal video/audio codecs are supported, but an MKV container itself does not guarantee compatibility. Transcoding is not implemented.
 - The server's current media URLs are built from `MediaBaseUrl`; make sure it is the host PC's LAN IP/hostname.
@@ -90,4 +90,5 @@ Notes:
 - Both PCs must be reachable on the same LAN and have their Windows firewall rules configured.
 - A server that is offline is reported as unavailable while reachable servers remain usable.
 - Duplicate detection is currently by exact media URL. The same movie stored on two PCs may appear twice.
-- This source revision has not been compiled or tested on the Chromecast in this environment. Open the `AndroidTV` project in Android Studio, run Gradle sync, and build/run before relying on it.
+- `.\gradlew.bat assembleDebug` built successfully on 2026-10-23 (JDK from Android Studio, SDK Platform 35). It has not been tested on a Chromecast/Android TV device.
+- `pc-server/` is an older standalone ASP.NET test server that predates the Windows app in `castbox-media-server`; the Windows app is the supported server.

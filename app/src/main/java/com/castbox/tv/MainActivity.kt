@@ -403,6 +403,8 @@ private fun Modifier.onFocusChangedCompat(onChanged: (Boolean) -> Unit): Modifie
     onChanged(it.isFocused)
 }
 
+private const val CONTROLLER_TIMEOUT_MS = 5000
+
 @OptIn(UnstableApi::class)
 @Composable
 private fun PlaybackScreen(movie: Movie, onBack: () -> Unit, getPlayer: (String) -> ExoPlayer) {
@@ -411,6 +413,27 @@ private fun PlaybackScreen(movie: Movie, onBack: () -> Unit, getPlayer: (String)
     var playerView by remember { mutableStateOf<PlayerView?>(null) }
     var controlsVisible by remember { mutableStateOf(true) }
     var playbackError by remember { mutableStateOf<String?>(null) }
+    var trackDialogOpen by remember { mutableStateOf(false) }
+
+    // Keep the controller (and the Audio/Subtitles buttons that follow it) on screen while a track
+    // dialog is open, then hand focus back to the player view so the controls can be reopened.
+    fun showTrackDialog(title: String, trackType: Int, allowDisable: Boolean) {
+        val activity = context as? Activity ?: return
+        val view = playerView
+        val builder = TrackSelectionDialogBuilder(activity, title, player, trackType)
+        if (allowDisable) builder.setShowDisableOption(true)
+        val dialog = builder.build()
+        dialog.setOnDismissListener {
+            trackDialogOpen = false
+            view?.controllerShowTimeoutMs = CONTROLLER_TIMEOUT_MS
+            view?.showController()
+            view?.requestFocus()
+        }
+        trackDialogOpen = true
+        view?.controllerShowTimeoutMs = 0
+        view?.showController()
+        dialog.show()
+    }
 
     BackHandler(onBack = onBack)
 
@@ -438,7 +461,7 @@ private fun PlaybackScreen(movie: Movie, onBack: () -> Unit, getPlayer: (String)
                     this.player = player
                     useController = true
                     controllerAutoShow = true
-                    controllerShowTimeoutMs = 5000
+                    controllerShowTimeoutMs = CONTROLLER_TIMEOUT_MS
                     setShowBuffering(PlayerView.SHOW_BUFFERING_WHEN_PLAYING)
                     keepScreenOn = true
                     isFocusable = true
@@ -460,21 +483,14 @@ private fun PlaybackScreen(movie: Movie, onBack: () -> Unit, getPlayer: (String)
 
         // These actions follow the native player's controller visibility, so they don't
         // permanently cover the movie. The native controller supplies seek/play/pause.
-        if (controlsVisible) {
+        if (controlsVisible || trackDialogOpen) {
             Row(
                 modifier = Modifier.align(Alignment.TopEnd).padding(20.dp),
                 horizontalArrangement = Arrangement.spacedBy(10.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                TvActionButton("Audio", onClick = {
-                    val activity = context as? Activity
-                    if (activity != null) TrackSelectionDialogBuilder(activity, "Audio track", player, C.TRACK_TYPE_AUDIO).build().show()
-                })
-                TvActionButton("Subtitles", onClick = {
-                    val activity = context as? Activity
-                    if (activity != null) TrackSelectionDialogBuilder(activity, "Subtitles", player, C.TRACK_TYPE_TEXT)
-                        .setShowDisableOption(true).build().show()
-                })
+                TvActionButton("Audio", onClick = { showTrackDialog("Audio track", C.TRACK_TYPE_AUDIO, false) })
+                TvActionButton("Subtitles", onClick = { showTrackDialog("Subtitles", C.TRACK_TYPE_TEXT, true) })
             }
         }
 
