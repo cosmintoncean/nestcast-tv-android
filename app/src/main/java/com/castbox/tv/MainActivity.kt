@@ -51,7 +51,13 @@ import androidx.media3.common.MediaItem
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
 import androidx.media3.common.util.UnstableApi
+import androidx.media3.decoder.ffmpeg.FfmpegAudioRenderer
+import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.exoplayer.Renderer
+import androidx.media3.exoplayer.audio.AudioRendererEventListener
+import androidx.media3.exoplayer.audio.AudioSink
+import androidx.media3.exoplayer.mediacodec.MediaCodecSelector
 import androidx.media3.ui.PlayerView
 import androidx.media3.ui.TrackSelectionDialogBuilder
 import kotlinx.coroutines.Dispatchers
@@ -135,6 +141,24 @@ private val Panel = Color(0xFF1A1C21)
 private val Accent = Color(0xFFFFB139)
 private val Muted = Color(0xFF9CA3AF)
 
+/**
+ * Adds FFmpeg software audio decoding after the device's own decoders. Many TVs/dongles (including the
+ * Chromecast with Google TV) can't decode E-AC-3 or output it as passthrough, which left those files silent.
+ */
+@androidx.annotation.OptIn(UnstableApi::class)
+private class CastBoxRenderersFactory(context: android.content.Context) : DefaultRenderersFactory(context) {
+    init { setExtensionRendererMode(EXTENSION_RENDERER_MODE_OFF) }
+
+    override fun buildAudioRenderers(
+        context: android.content.Context, extensionRendererMode: Int, mediaCodecSelector: MediaCodecSelector,
+        enableDecoderFallback: Boolean, audioSink: AudioSink, eventHandler: android.os.Handler,
+        eventListener: AudioRendererEventListener, out: ArrayList<Renderer>
+    ) {
+        super.buildAudioRenderers(context, extensionRendererMode, mediaCodecSelector, enableDecoderFallback, audioSink, eventHandler, eventListener, out)
+        out.add(FfmpegAudioRenderer(eventHandler, eventListener, audioSink))
+    }
+}
+
 class MainActivity : ComponentActivity() {
     private var player: ExoPlayer? = null
 
@@ -182,7 +206,7 @@ class MainActivity : ComponentActivity() {
                         onBack = { player?.stop(); selected = null },
                         getPlayer = { url ->
                             player?.release()
-                            ExoPlayer.Builder(this).build().also { p ->
+                            ExoPlayer.Builder(this, CastBoxRenderersFactory(this)).build().also { p ->
                                 player = p
                                 p.setMediaItem(MediaItem.fromUri(Uri.parse(url)))
                                 p.prepare()
