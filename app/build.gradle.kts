@@ -54,6 +54,8 @@ dependencies {
     implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.8.7")
     implementation("androidx.media3:media3-exoplayer:1.5.1")
     implementation("androidx.media3:media3-ui:1.5.1")
+    // Loads and caches show poster images.
+    implementation("io.coil-kt:coil-compose:2.7.0")
     // Software decoder for audio the TV can't play itself (E-AC-3/Dolby Digital Plus, AC-3, DTS, TrueHD...).
     // Jellyfin's prebuilt FFmpeg extension; GPL-3.0, so keep it in mind before distributing the APK.
     implementation("org.jellyfin.media3:media3-ffmpeg-decoder:1.5.0+1")

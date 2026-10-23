@@ -27,6 +27,10 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.composed
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.layout.ContentScale
+import coil.compose.AsyncImage
 import androidx.compose.ui.focus.FocusDirection
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
@@ -64,6 +68,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
@@ -82,7 +87,9 @@ data class Movie(
     val sizeBytes: Long,
     val url: String,
     /** Folder names from the library root down to the file's directory. */
-    val folderPath: List<String> = emptyList()
+    val folderPath: List<String> = emptyList(),
+    /** Identifies the file for watched/resume state; uses the PC's permanent ID so it survives IP changes. */
+    val watchKey: String = ""
 )
 
 /** One folder in the browsable library tree; [movies] are the files directly inside it. */
@@ -90,6 +97,8 @@ class FolderNode(val name: String) {
     val children = java.util.TreeMap<String, FolderNode>(String.CASE_INSENSITIVE_ORDER)
     val movies = mutableListOf<Movie>()
     var totalMovies = 0
+
+    fun allMovies(): List<Movie> = movies + children.values.flatMap { it.allMovies() }
 }
 
 private fun buildFolderTree(movies: List<Movie>): FolderNode {
@@ -162,10 +171,14 @@ private class CastBoxRenderersFactory(context: android.content.Context) : Defaul
 
 class MainActivity : ComponentActivity() {
     private var player: ExoPlayer? = null
+    private var watchStore: WatchStore? = null
+    private var playingKey: String = ""
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         val prefs = getSharedPreferences("castbox", MODE_PRIVATE)
+        val watch = WatchStore(prefs).also { watchStore = it }
+        val posters = PosterRepo(prefs)
         val savedServers = runCatching {
             val legacy = prefs.getString("server", null)
             val savedJson = prefs.getString("servers", null) ?: if (!legacy.isNullOrBlank()) {
@@ -187,6 +200,10 @@ class MainActivity : ComponentActivity() {
             var error by remember { mutableStateOf("") }
             var isConnected by remember { mutableStateOf(false) }
             var manageSources by remember { mutableStateOf(true) }
+            // Library navigation lives here so it survives playing a video.
+            var searchQuery by remember { mutableStateOf("") }
+            var lastPlayedId by remember { mutableStateOf("") }
+            var openFolders by remember { mutableStateOf<List<List<String>>>(emptyList()) }
 
             fun persistServers(updated: List<MediaServer>) {
                 servers = updated
@@ -204,12 +221,15 @@ class MainActivity : ComponentActivity() {
                 if (selected != null) {
                     PlaybackScreen(
                         movie = selected!!,
-                        onBack = { player?.stop(); selected = null },
-                        getPlayer = { url ->
+                        watch = watch,
+                        onBack = { player?.stop(); playingKey = ""; selected = null },
+                        getPlayer = { movie ->
                             player?.release()
                             ExoPlayer.Builder(this, CastBoxRenderersFactory(this)).build().also { p ->
                                 player = p
-                                p.setMediaItem(MediaItem.fromUri(Uri.parse(url)))
+                                playingKey = movie.watchKey
+                                // Pick up where the user left off if they backed out earlier.
+                                p.setMediaItem(MediaItem.fromUri(Uri.parse(movie.url)), watch.resumePosition(movie.watchKey))
                                 p.prepare()
                                 p.playWhenReady = true
                             }
@@ -239,6 +259,7 @@ class MainActivity : ComponentActivity() {
                                             error = listOf(result.errors, result.notes).filter { it.isNotBlank() }.joinToString("\n")
                                         } else {
                                             movies = result.movies; tree = result.tree
+                                            openFolders = emptyList(); searchQuery = ""
                                             val unavailable = if (result.failed.isNotEmpty()) "Connected to ${servers.size - result.failed.size} of ${servers.size} PCs. Unavailable: ${result.failed.joinToString { it.name }}." else ""
                                             error = listOf(unavailable, result.notes).filter { it.isNotBlank() }.joinToString(" ")
                                             isConnected = true; manageSources = false
@@ -252,6 +273,10 @@ class MainActivity : ComponentActivity() {
                 } else {
                     LibraryScreen(
                         server = servers.joinToString(" · ") { it.name }, movies = movies, tree = tree,
+                        watch = watch, posters = posters,
+                        query = searchQuery, onQueryChange = { searchQuery = it },
+                        openFolders = openFolders, onOpenFoldersChange = { openFolders = it },
+                        lastPlayedId = lastPlayedId,
                         loading = loading, error = error,
                         onBackToConnect = { manageSources = true },
                         onRefresh = {
@@ -267,7 +292,7 @@ class MainActivity : ComponentActivity() {
                                 finally { loading = false }
                             }
                         },
-                        onPlay = { selected = it }
+                        onPlay = { lastPlayedId = it.id; selected = it }
                     )
                 }
               }
@@ -276,6 +301,8 @@ class MainActivity : ComponentActivity() {
     }
 
     override fun onStop() {
+        // Save progress before the player is released (the app can be left mid-video via Home or sleep).
+        player?.let { p -> watchStore?.save(playingKey, p.currentPosition, p.duration.takeIf { it != C.TIME_UNSET } ?: 0L) }
         player?.release()
         player = null
         super.onStop()
@@ -294,18 +321,22 @@ private suspend fun loadLibraries(servers: List<MediaServer>): LibraryResult = c
     val results = servers.map { original ->
         async(Dispatchers.IO) {
             val (resolved, note) = resolveServer(original)
-            var source = resolved
-            val library = runCatching {
-                fetchLibrary(source.baseUrl).map { movie ->
+            val raw = runCatching { fetchLibrary(resolved.baseUrl) }
+            // Remember the PC's ID the first time we reach it so it can be found again if its address changes.
+            var learned = resolved
+            if (raw.isSuccess && learned.serverId.isBlank()) fetchServerId(learned.baseUrl)?.let { learned = learned.copy(serverId = it) }
+            val source = learned
+            val identity = source.serverId.ifBlank { source.baseUrl }
+            val library = raw.map { movies ->
+                movies.map { movie ->
                     movie.copy(
                         id = "${source.baseUrl}|${movie.id}",
                         url = if (movie.url.startsWith("http://") || movie.url.startsWith("https://")) movie.url else source.baseUrl.trimEnd('/') + "/" + movie.url.trimStart('/'),
-                        folderPath = if (servers.size > 1) listOf(source.name) + movie.folderPath else movie.folderPath
+                        folderPath = if (servers.size > 1) listOf(source.name) + movie.folderPath else movie.folderPath,
+                        watchKey = "$identity|${movie.id}"
                     )
                 }
             }
-            // Remember the PC's ID the first time we reach it so it can be found again if its address changes.
-            if (library.isSuccess && source.serverId.isBlank()) fetchServerId(source.baseUrl)?.let { source = source.copy(serverId = it) }
             Triple(source, library, note)
         }
     }.awaitAll()
@@ -554,12 +585,16 @@ private fun ConnectScreen(
 
 @Composable
 private fun LibraryScreen(
-    server: String, movies: List<Movie>, tree: FolderNode, loading: Boolean, error: String,
+    server: String, movies: List<Movie>, tree: FolderNode, watch: WatchStore, posters: PosterRepo,
+    query: String, onQueryChange: (String) -> Unit,
+    openFolders: List<List<String>>, onOpenFoldersChange: (List<List<String>>) -> Unit,
+    lastPlayedId: String,
+    loading: Boolean, error: String,
     onBackToConnect: () -> Unit, onRefresh: () -> Unit, onPlay: (Movie) -> Unit
 ) {
-    var query by remember { mutableStateOf("") }
     // Each entry is the folder path (from the library root) the user has opened; the last one is on screen.
-    var stack by remember(tree) { mutableStateOf(listOf(tree.initialPath())) }
+    // The state lives in the Activity so it survives watching a video (this screen leaves composition).
+    val stack = openFolders.ifEmpty { listOf(tree.initialPath()) }
     val path = stack.last()
     val current = remember(tree, path) { tree.resolve(path) }
     val folders = remember(current) { current.entries() }
@@ -571,13 +606,19 @@ private fun LibraryScreen(
     var searchOpen by remember { mutableStateOf(false) }
     val firstItem = remember { FocusRequester() }
 
-    if (searchOpen) SearchDialog(query = query, onQueryChange = { query = it }, onClose = { searchOpen = false })
+    if (searchOpen) SearchDialog(query = query, onQueryChange = onQueryChange, onClose = { searchOpen = false })
     // Back clears an active search first, then climbs out of folders.
-    BackHandler(enabled = searching || stack.size > 1) { if (searching) query = "" else stack = stack.dropLast(1) }
+    var returnedFrom by remember { mutableStateOf<List<String>?>(null) } // folder just left, to refocus it
+    BackHandler(enabled = searching || stack.size > 1) {
+        if (searching) onQueryChange("")
+        else { returnedFrom = stack.last(); onOpenFoldersChange(stack.dropLast(1)) }
+    }
     // Rows from the previous folder leave composition, so hand focus to the first row of the new one.
     LaunchedEffect(tree, path, searching, loading) {
         if (!loading) runCatching { firstItem.requestFocus() }
     }
+    // Look up show posters for the folders on screen (cached, so each show is fetched only once).
+    LaunchedEffect(folders) { posters.ensure(folders.map { it.segments.last() }) }
 
     Column(Modifier.fillMaxSize().background(Bg).padding(horizontal = 42.dp, vertical = 24.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -585,7 +626,9 @@ private fun LibraryScreen(
                 Text("CASTBOX", color = Accent, fontSize = 14.sp, fontWeight = FontWeight.Bold, letterSpacing = 4.sp)
                 Text("Your movie library", fontSize = 32.sp, fontWeight = FontWeight.Bold, color = Color.White)
                 val where = if (searching) "Search results" else if (path.isEmpty()) server else path.joinToString("  ›  ")
-                Text("${movies.size} videos  •  $where", color = Muted, fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                val watchedTotal = movies.count { watch.isWatched(it.watchKey) }
+                Text("${movies.size} videos  •  $watchedTotal watched  •  $where", color = Muted, fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Text("Hold OK on a video or folder to mark it watched or unwatched", color = Muted, fontSize = 11.sp, maxLines = 1)
             }
             TvActionButton(if (searching) "Search: $query" else "Search", onClick = { searchOpen = true })
             Spacer(Modifier.width(10.dp))
@@ -604,22 +647,33 @@ private fun LibraryScreen(
                 verticalArrangement = Arrangement.spacedBy(8.dp),
                 contentPadding = PaddingValues(bottom = 24.dp)
             ) {
+                // After watching something, focus returns to that video instead of the top of the list.
                 if (searching) {
+                    val target = filtered.firstOrNull { it.id == lastPlayedId } ?: filtered.first()
                     items(filtered, key = { it.id }) { movie ->
-                        MovieRow(movie = movie, onClick = { onPlay(movie) }, modifier = if (movie === filtered.first()) Modifier.focusRequester(firstItem) else Modifier)
+                        MovieRow(
+                            movie = movie, progress = watch.progress(movie.watchKey), watched = watch.isWatched(movie.watchKey),
+                            onClick = { onPlay(movie) }, onToggleWatched = { toggleWatched(watch, listOf(movie)) },
+                            modifier = if (movie === target) Modifier.focusRequester(firstItem) else Modifier
+                        )
                     }
                 } else {
                     items(folders, key = { "folder:" + it.segments.joinToString("/") }) { entry ->
+                        val inside = entry.node.allMovies()
                         FolderRow(
                             label = entry.label, count = entry.node.totalMovies,
-                            modifier = if (entry === folders.first()) Modifier.focusRequester(firstItem) else Modifier,
-                            onClick = { stack = stack + listOf(path + entry.segments) }
+                            watchedCount = inside.count { watch.isWatched(it.watchKey) },
+                            posterUrl = posters.posterFor(entry.segments.last()),
+                            modifier = if (isFolderFocusTarget(entry, folders, path, returnedFrom, current, lastPlayedId)) Modifier.focusRequester(firstItem) else Modifier,
+                            onClick = { onOpenFoldersChange(stack + listOf(path + entry.segments)) },
+                            onToggleWatched = { toggleWatched(watch, inside) }
                         )
                     }
                     items(current.movies, key = { it.id }) { movie ->
                         MovieRow(
-                            movie = movie, onClick = { onPlay(movie) },
-                            modifier = if (folders.isEmpty() && movie === current.movies.first()) Modifier.focusRequester(firstItem) else Modifier
+                            movie = movie, progress = watch.progress(movie.watchKey), watched = watch.isWatched(movie.watchKey),
+                            onClick = { onPlay(movie) }, onToggleWatched = { toggleWatched(watch, listOf(movie)) },
+                            modifier = if (movie.id == lastPlayedId || (folders.isEmpty() && movie === current.movies.first() && current.movies.none { it.id == lastPlayedId })) Modifier.focusRequester(firstItem) else Modifier
                         )
                     }
                 }
@@ -628,23 +682,82 @@ private fun LibraryScreen(
     }
 }
 
+/**
+ * Focusable row behaviour for a TV remote: a tap of OK runs [onClick]; holding OK runs [onLongClick] once.
+ * (Compose's combinedClickable ignores held keys, so key repeats are handled here directly.)
+ */
+private fun Modifier.longPressClickable(onClick: () -> Unit, onLongClick: () -> Unit): Modifier = composed {
+    var longPressHandled by remember { mutableStateOf(false) }
+    this
+        .onPreviewKeyEvent { event ->
+            val isSelect = event.key == Key.DirectionCenter || event.key == Key.Enter || event.key == Key.NumPadEnter
+            if (!isSelect) return@onPreviewKeyEvent false
+            when (event.type) {
+                KeyEventType.KeyDown -> {
+                    if (event.nativeKeyEvent.repeatCount == 0) longPressHandled = false
+                    else if (!longPressHandled) { longPressHandled = true; onLongClick() }
+                    true
+                }
+                KeyEventType.KeyUp -> {
+                    if (!longPressHandled) onClick()
+                    longPressHandled = false
+                    true
+                }
+                else -> false
+            }
+        }
+        .focusable()
+}
+
+/** Which folder row should take focus: the one just left, else the first (unless a played video is on this level). */
+private fun isFolderFocusTarget(
+    entry: FolderEntry, folders: List<FolderEntry>, path: List<String>, returnedFrom: List<String>?,
+    current: FolderNode, lastPlayedId: String
+): Boolean {
+    val returned = folders.firstOrNull { path + it.segments == returnedFrom }
+    return if (returned != null) entry === returned
+    else entry === folders.first() && current.movies.none { it.id == lastPlayedId }
+}
+
+/** Marks every video in [videos] watched, or clears them all if they already are. */
+private fun toggleWatched(watch: WatchStore, videos: List<Movie>) {
+    val allWatched = videos.isNotEmpty() && videos.all { watch.isWatched(it.watchKey) }
+    videos.forEach { if (allWatched) watch.markUnwatched(it.watchKey) else watch.markWatched(it.watchKey) }
+}
+
 @Composable
-private fun FolderRow(label: String, count: Int, modifier: Modifier = Modifier, onClick: () -> Unit) {
+private fun FolderRow(
+    label: String, count: Int, watchedCount: Int, posterUrl: String?, modifier: Modifier = Modifier,
+    onClick: () -> Unit, onToggleWatched: () -> Unit
+) {
     var focused by remember { mutableStateOf(false) }
     Surface(
-        onClick = onClick,
         color = if (focused) Color(0xFF33302A) else Panel,
         shape = RoundedCornerShape(12.dp),
         modifier = modifier.fillMaxWidth().onFocusChangedCompat { focused = it }
+            .clip(RoundedCornerShape(12.dp)).longPressClickable(onClick = onClick, onLongClick = onToggleWatched)
     ) {
         Row(Modifier.padding(horizontal = 18.dp, vertical = 14.dp), verticalAlignment = Alignment.CenterVertically) {
-            Box(Modifier.size(width = 56.dp, height = 56.dp).background(Color(0xFF292B31), RoundedCornerShape(8.dp)), contentAlignment = Alignment.Center) {
-                Text("DIR", color = Accent, fontWeight = FontWeight.Bold, fontSize = 12.sp)
+            if (posterUrl != null) {
+                AsyncImage(
+                    model = posterUrl, contentDescription = null, contentScale = ContentScale.Crop,
+                    modifier = Modifier.size(width = 56.dp, height = 80.dp).clip(RoundedCornerShape(8.dp)).background(Color(0xFF292B31))
+                )
+            } else {
+                Box(Modifier.size(width = 56.dp, height = 56.dp).background(Color(0xFF292B31), RoundedCornerShape(8.dp)), contentAlignment = Alignment.Center) {
+                    Text("DIR", color = Accent, fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                }
             }
             Spacer(Modifier.width(16.dp))
             Column(Modifier.weight(1f)) {
                 Text(label, fontSize = 18.sp, fontWeight = FontWeight.SemiBold, color = Color.White, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                Text(if (count == 1) "1 video" else "$count videos", color = Muted, fontSize = 12.sp)
+                val videos = if (count == 1) "1 video" else "$count videos"
+                val status = when {
+                    count > 0 && watchedCount >= count -> "  •  ✓ all watched"
+                    watchedCount > 0 -> "  •  $watchedCount watched"
+                    else -> ""
+                }
+                Text(videos + status, color = if (watchedCount >= count && count > 0) Accent else Muted, fontSize = 12.sp)
             }
             Text("OPEN  ›", color = Accent, fontWeight = FontWeight.Bold, fontSize = 13.sp)
         }
@@ -670,26 +783,47 @@ private fun TvActionButton(label: String, onClick: () -> Unit, enabled: Boolean 
 }
 
 @Composable
-private fun MovieRow(movie: Movie, onClick: () -> Unit, modifier: Modifier = Modifier) {
+private fun MovieRow(
+    movie: Movie, progress: WatchStore.Progress?, watched: Boolean, onClick: () -> Unit, onToggleWatched: () -> Unit,
+    modifier: Modifier = Modifier
+) {
     var focused by remember { mutableStateOf(false) }
     Surface(
-        onClick = onClick,
         color = if (focused) Color(0xFF33302A) else Panel,
         shape = RoundedCornerShape(12.dp),
         modifier = modifier.fillMaxWidth().onFocusChangedCompat { focused = it }
+            .clip(RoundedCornerShape(12.dp)).longPressClickable(onClick = onClick, onLongClick = onToggleWatched)
     ) {
         Row(Modifier.padding(horizontal = 18.dp, vertical = 14.dp), verticalAlignment = Alignment.CenterVertically) {
             Box(Modifier.size(width = 56.dp, height = 70.dp).background(Color(0xFF292B31), RoundedCornerShape(8.dp)), contentAlignment = Alignment.Center) {
-                Text(movie.extension.uppercase(), color = Accent, fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                Text(if (watched) "✓" else movie.extension.uppercase(), color = Accent, fontWeight = FontWeight.Bold, fontSize = if (watched) 22.sp else 12.sp)
             }
             Spacer(Modifier.width(16.dp))
             Column(Modifier.weight(1f)) {
-                Text(movie.title, fontSize = 18.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Text(movie.title, fontSize = 18.sp, fontWeight = FontWeight.SemiBold, color = if (watched) Muted else Color.White, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 Text("${movie.fileName}  •  ${formatBytes(movie.sizeBytes)}", color = Muted, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                if (!watched && progress != null && progress.durationMs > 0 && progress.positionMs >= 10_000L) {
+                    Spacer(Modifier.height(6.dp))
+                    LinearProgressIndicator(
+                        progress = { (progress.positionMs.toFloat() / progress.durationMs).coerceIn(0f, 1f) },
+                        modifier = Modifier.fillMaxWidth(0.5f).height(4.dp), color = Accent, trackColor = Color(0xFF34363D)
+                    )
+                }
             }
-            Text("PLAY  ›", color = Accent, fontWeight = FontWeight.Bold, fontSize = 13.sp)
+            val action = when {
+                watched -> "WATCHED"
+                progress != null && progress.positionMs >= 10_000L -> "RESUME  ${formatClock(progress.positionMs)}  ›"
+                else -> "PLAY  ›"
+            }
+            Text(action, color = Accent, fontWeight = FontWeight.Bold, fontSize = 13.sp)
         }
     }
+}
+
+private fun formatClock(ms: Long): String {
+    val total = ms / 1000
+    val h = total / 3600; val m = (total % 3600) / 60; val s = total % 60
+    return if (h > 0) "%d:%02d:%02d".format(h, m, s) else "%d:%02d".format(m, s)
 }
 
 private fun Modifier.onFocusChangedCompat(onChanged: (Boolean) -> Unit): Modifier = this.onFocusChanged {
@@ -706,12 +840,22 @@ private const val CONTROLLER_TIMEOUT_MS = 5000
 @androidx.annotation.OptIn(UnstableApi::class)
 @OptIn(UnstableApi::class)
 @Composable
-private fun PlaybackScreen(movie: Movie, onBack: () -> Unit, getPlayer: (String) -> ExoPlayer) {
-    val player = remember(movie.url) { getPlayer(movie.url) }
+private fun PlaybackScreen(movie: Movie, watch: WatchStore, onBack: () -> Unit, getPlayer: (Movie) -> ExoPlayer) {
+    val player = remember(movie.url) { getPlayer(movie) }
     var playerView by remember { mutableStateOf<PlayerView?>(null) }
     var playbackError by remember { mutableStateOf<String?>(null) }
 
-    BackHandler(onBack = onBack)
+    fun saveProgress() {
+        val duration = player.duration
+        if (duration != C.TIME_UNSET) watch.save(movie.watchKey, player.currentPosition, duration)
+    }
+
+    // Save on the way out, so backing out by mistake doesn't lose the place.
+    BackHandler { saveProgress(); onBack() }
+    // ...and every few seconds, in case the app is killed or the TV loses power mid-video.
+    LaunchedEffect(player) {
+        while (true) { delay(5000); if (player.isPlaying) saveProgress() }
+    }
 
     DisposableEffect(player) {
         val listener = object : Player.Listener {
@@ -721,9 +865,13 @@ private fun PlaybackScreen(movie: Movie, onBack: () -> Unit, getPlayer: (String)
             override fun onPlayerErrorChanged(error: PlaybackException?) {
                 if (error == null) playbackError = null
             }
+            override fun onPlaybackStateChanged(state: Int) {
+                if (state == Player.STATE_ENDED) watch.markWatched(movie.watchKey)
+            }
         }
         player.addListener(listener)
         onDispose {
+            saveProgress()
             player.removeListener(listener)
             playerView?.player = null
             // The Activity owns the player lifecycle and also releases it when leaving playback.
