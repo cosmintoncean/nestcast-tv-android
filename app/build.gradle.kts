@@ -16,6 +16,21 @@ android {
         versionName = "0.3.0"
     }
 
+    buildTypes {
+        release {
+            // Debuggable builds run with CheckJNI and no shrinking, which is far too slow for Compose on a TV
+            // dongle. This release build is signed with the local debug key for personal sideloading only;
+            // use a real signing config before distributing it.
+            isMinifyEnabled = true
+            isShrinkResources = true
+            proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
+            signingConfig = signingConfigs.getByName("debug")
+        }
+    }
+
+    // targetSdk 28 is intentional for this sideloaded app; Play's minimum-target check doesn't apply.
+    lint { disable += "ExpiredTargetSdkVersion" }
+
     buildFeatures { compose = true }
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17

@@ -24,7 +24,14 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.focus.FocusDirection
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.input.key.type
+import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.input.key.Key
@@ -45,6 +52,9 @@ import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.ui.PlayerView
 import androidx.media3.ui.TrackSelectionDialogBuilder
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
@@ -60,8 +70,62 @@ data class Movie(
     val fileName: String,
     val extension: String,
     val sizeBytes: Long,
-    val url: String
+    val url: String,
+    /** Folder names from the library root down to the file's directory. */
+    val folderPath: List<String> = emptyList()
 )
+
+/** One folder in the browsable library tree; [movies] are the files directly inside it. */
+class FolderNode(val name: String) {
+    val children = java.util.TreeMap<String, FolderNode>(String.CASE_INSENSITIVE_ORDER)
+    val movies = mutableListOf<Movie>()
+    var totalMovies = 0
+}
+
+private fun buildFolderTree(movies: List<Movie>): FolderNode {
+    val root = FolderNode("")
+    for (movie in movies) {
+        var node = root
+        node.totalMovies++
+        for (segment in movie.folderPath) {
+            node = node.children.getOrPut(segment) { FolderNode(segment) }
+            node.totalMovies++
+        }
+        node.movies += movie
+    }
+    return root
+}
+
+/** Follows [path] from [root]; stops at the deepest folder that exists. */
+private fun FolderNode.resolve(path: List<String>): FolderNode {
+    var node = this
+    for (segment in path) node = node.children[segment] ?: return node
+    return node
+}
+
+/** A displayed sub-folder: single-child chains with no files are shown as one entry. */
+private class FolderEntry(val label: String, val segments: List<String>, val node: FolderNode)
+
+private fun FolderNode.entries(): List<FolderEntry> = children.values.map { child ->
+    var node = child
+    val segments = mutableListOf(child.name)
+    while (node.movies.isEmpty() && node.children.size == 1) {
+        node = node.children.values.first()
+        segments += node.name
+    }
+    FolderEntry(segments.joinToString("  ›  "), segments, node)
+}
+
+/** Skips straight into the only folder when a level has nothing else to show. */
+private fun FolderNode.initialPath(): List<String> {
+    val path = mutableListOf<String>()
+    var node = this
+    while (node.movies.isEmpty() && node.children.size == 1) {
+        node = node.children.values.first()
+        path += node.name
+    }
+    return path
+}
 
 private val Bg = Color(0xFF101114)
 private val Panel = Color(0xFF1A1C21)
@@ -89,6 +153,7 @@ class MainActivity : ComponentActivity() {
         setContent {
             var servers by remember { mutableStateOf(savedServers) }
             var movies by remember { mutableStateOf<List<Movie>>(emptyList()) }
+            var tree by remember { mutableStateOf(FolderNode("")) }
             var selected by remember { mutableStateOf<Movie?>(null) }
             var loading by remember { mutableStateOf(false) }
             var error by remember { mutableStateOf("") }
@@ -106,6 +171,8 @@ class MainActivity : ComponentActivity() {
                 background = Bg, surface = Panel, primary = Accent,
                 onBackground = Color.White, onSurface = Color.White
             )) {
+              // Text without an explicit colour would otherwise default to black on the dark background.
+              Surface(modifier = Modifier.fillMaxSize(), color = Bg, contentColor = Color.White) {
                 if (selected != null) {
                     PlaybackScreen(
                         movie = selected!!,
@@ -138,23 +205,12 @@ class MainActivity : ComponentActivity() {
                                 loading = true; error = ""
                                 lifecycleScope.launch {
                                     try {
-                                        val results = withContext(Dispatchers.IO) {
-                                            servers.map { source ->
-                                                source to runCatching { fetchLibrary(source.baseUrl).map { movie ->
-                                                    movie.copy(
-                                                        id = "${source.baseUrl}|${movie.id}",
-                                                        url = if (movie.url.startsWith("http://") || movie.url.startsWith("https://")) movie.url else source.baseUrl.trimEnd('/') + "/" + movie.url.trimStart('/')
-                                                    )
-                                                } }
-                                            }
-                                        }
-                                        val good = results.filter { it.second.isSuccess }
-                                        if (good.isEmpty()) {
-                                            error = results.joinToString("\n") { (source, result) -> "${source.name}: ${result.exceptionOrNull()?.message ?: "Connection failed"}" }
+                                        val result = loadLibraries(servers)
+                                        if (!result.anySuccess) {
+                                            error = result.errors
                                         } else {
-                                            movies = good.flatMap { it.second.getOrDefault(emptyList()) }.distinctBy { it.url }.sortedBy { it.title.lowercase() }
-                                            val failed = results.filter { it.second.isFailure }
-                                            error = if (failed.isNotEmpty()) "Connected to ${good.size} of ${servers.size} PCs. Unavailable: ${failed.joinToString { it.first.name }}." else ""
+                                            movies = result.movies; tree = result.tree
+                                            error = if (result.failed.isNotEmpty()) "Connected to ${servers.size - result.failed.size} of ${servers.size} PCs. Unavailable: ${result.failed.joinToString { it.name }}." else ""
                                             isConnected = true; manageSources = false
                                         }
                                     } finally { loading = false }
@@ -165,27 +221,16 @@ class MainActivity : ComponentActivity() {
                     )
                 } else {
                     LibraryScreen(
-                        server = servers.joinToString(" · ") { it.name }, movies = movies,
+                        server = servers.joinToString(" · ") { it.name }, movies = movies, tree = tree,
                         loading = loading, error = error,
                         onBackToConnect = { manageSources = true },
                         onRefresh = {
                             loading = true; error = ""
                             lifecycleScope.launch {
                                 try {
-                                    val results = withContext(Dispatchers.IO) {
-                                        servers.map { source ->
-                                            source to runCatching { fetchLibrary(source.baseUrl).map { movie ->
-                                                movie.copy(
-                                                    id = "${source.baseUrl}|${movie.id}",
-                                                    url = if (movie.url.startsWith("http://") || movie.url.startsWith("https://")) movie.url else source.baseUrl.trimEnd('/') + "/" + movie.url.trimStart('/')
-                                                )
-                                            } }
-                                        }
-                                    }
-                                    val good = results.filter { it.second.isSuccess }
-                                    movies = good.flatMap { it.second.getOrDefault(emptyList()) }.distinctBy { it.url }.sortedBy { it.title.lowercase() }
-                                    val failed = results.filter { it.second.isFailure }
-                                    error = if (failed.isNotEmpty()) "Unavailable sources: ${failed.joinToString { it.first.name }}" else if (movies.isEmpty()) "No videos found. Check the PCs and media folders." else ""
+                                    val result = loadLibraries(servers)
+                                    movies = result.movies; tree = result.tree
+                                    error = if (result.failed.isNotEmpty()) "Unavailable sources: ${result.failed.joinToString { it.name }}" else if (movies.isEmpty()) "No videos found. Check the PCs and media folders." else ""
                                 } catch (e: Exception) { error = "Refresh failed: ${e.message ?: "check network"}" }
                                 finally { loading = false }
                             }
@@ -193,6 +238,7 @@ class MainActivity : ComponentActivity() {
                         onPlay = { selected = it }
                     )
                 }
+              }
             }
         }
     }
@@ -201,6 +247,39 @@ class MainActivity : ComponentActivity() {
         player?.release()
         player = null
         super.onStop()
+    }
+}
+
+private class LibraryResult(
+    val movies: List<Movie>, val tree: FolderNode,
+    val failed: List<MediaServer>, val errors: String, val anySuccess: Boolean
+)
+
+/** Fetches every server at the same time so one offline PC doesn't delay the others. */
+private suspend fun loadLibraries(servers: List<MediaServer>): LibraryResult = coroutineScope {
+    val results = servers.map { source ->
+        async(Dispatchers.IO) {
+            source to runCatching {
+                fetchLibrary(source.baseUrl).map { movie ->
+                    movie.copy(
+                        id = "${source.baseUrl}|${movie.id}",
+                        url = if (movie.url.startsWith("http://") || movie.url.startsWith("https://")) movie.url else source.baseUrl.trimEnd('/') + "/" + movie.url.trimStart('/'),
+                        folderPath = if (servers.size > 1) listOf(source.name) + movie.folderPath else movie.folderPath
+                    )
+                }
+            }
+        }
+    }.awaitAll()
+    withContext(Dispatchers.Default) {
+        val good = results.filter { it.second.isSuccess }
+        val failed = results.filter { it.second.isFailure }
+        val movies = good.flatMap { it.second.getOrDefault(emptyList()) }.distinctBy { it.url }.sortedBy { it.title.lowercase() }
+        LibraryResult(
+            movies = movies, tree = buildFolderTree(movies),
+            failed = failed.map { it.first },
+            errors = failed.joinToString("\n") { (source, result) -> "${source.name}: ${result.exceptionOrNull()?.message ?: "Connection failed"}" },
+            anySuccess = good.isNotEmpty()
+        )
     }
 }
 
@@ -220,10 +299,16 @@ private fun fetchLibrary(base: String): List<Movie> {
             val title = o.optString("title", o.optString("fileName", "Untitled"))
             val ext = o.optString("extension", "").lowercase()
             if (ext !in setOf("mp4", "m4v", "mov", "mkv", "avi", "webm", "mpeg", "mpg", "ts")) return@mapNotNull null
+            // Newer servers send rootName + relativeFolder; older ones only the absolute folder path.
+            val folderPath = if (o.has("rootName")) {
+                listOf(o.optString("rootName")).filter { it.isNotBlank() } +
+                    o.optString("relativeFolder").split('/', '\\').filter { it.isNotBlank() }
+            } else o.optString("folder").split('/', '\\').filter { it.isNotBlank() }
             Movie(
                 id = o.optString("id"), title = title,
                 fileName = o.optString("fileName", title), extension = ext,
-                sizeBytes = o.optLong("sizeBytes", 0L), url = o.optString("url")
+                sizeBytes = o.optLong("sizeBytes", 0L), url = o.optString("url"),
+                folderPath = folderPath
             ).takeIf { it.url.startsWith("http://") || it.url.startsWith("https://") }
         }.sortedBy { it.title.lowercase() }
     } finally { connection.disconnect() }
@@ -330,19 +415,36 @@ private fun ConnectScreen(
 
 @Composable
 private fun LibraryScreen(
-    server: String, movies: List<Movie>, loading: Boolean, error: String,
+    server: String, movies: List<Movie>, tree: FolderNode, loading: Boolean, error: String,
     onBackToConnect: () -> Unit, onRefresh: () -> Unit, onPlay: (Movie) -> Unit
 ) {
     var query by remember { mutableStateOf("") }
+    // Each entry is the folder path (from the library root) the user has opened; the last one is on screen.
+    var stack by remember(tree) { mutableStateOf(listOf(tree.initialPath())) }
+    val path = stack.last()
+    val current = remember(tree, path) { tree.resolve(path) }
+    val folders = remember(current) { current.entries() }
+    val searching = query.isNotBlank()
     val filtered = remember(movies, query) {
-        movies.filter { it.title.contains(query, ignoreCase = true) || it.fileName.contains(query, ignoreCase = true) }
+        if (!searching) emptyList()
+        else movies.filter { it.title.contains(query, ignoreCase = true) || it.fileName.contains(query, ignoreCase = true) }
     }
+    val focusManager = LocalFocusManager.current
+    val firstItem = remember { FocusRequester() }
+
+    BackHandler(enabled = !searching && stack.size > 1) { stack = stack.dropLast(1) }
+    // Rows from the previous folder leave composition, so hand focus to the first row of the new one.
+    LaunchedEffect(tree, path, searching, loading) {
+        if (!loading) runCatching { firstItem.requestFocus() }
+    }
+
     Column(Modifier.fillMaxSize().background(Bg).padding(horizontal = 42.dp, vertical = 24.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Column(Modifier.weight(1f)) {
                 Text("CASTBOX", color = Accent, fontSize = 14.sp, fontWeight = FontWeight.Bold, letterSpacing = 4.sp)
-                Text("Your movie library", fontSize = 32.sp, fontWeight = FontWeight.Bold)
-                Text("${movies.size} videos  •  $server", color = Muted, fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Text("Your movie library", fontSize = 32.sp, fontWeight = FontWeight.Bold, color = Color.White)
+                val where = if (searching) "Search results" else if (path.isEmpty()) server else path.joinToString("  ›  ")
+                Text("${movies.size} videos  •  $where", color = Muted, fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
             }
             TvActionButton("Refresh", onClick = onRefresh, enabled = !loading)
             Spacer(Modifier.width(10.dp))
@@ -350,18 +452,68 @@ private fun LibraryScreen(
         }
         Spacer(Modifier.height(16.dp))
         if (error.isNotBlank()) Text(error, color = Color(0xFFFFB4A8), modifier = Modifier.padding(bottom = 10.dp))
-        OutlinedTextField(value = query, onValueChange = { query = it }, singleLine = true, label = { Text("Search movies") }, modifier = Modifier.fillMaxWidth(0.62f))
+        OutlinedTextField(
+            value = query, onValueChange = { query = it }, singleLine = true, label = { Text("Search movies") },
+            modifier = Modifier.fillMaxWidth(0.62f).onPreviewKeyEvent { event ->
+                // A text field swallows Up/Down on TV remotes; pass them on so focus can leave the field.
+                if (event.type == KeyEventType.KeyDown && event.key == Key.DirectionDown) { focusManager.moveFocus(FocusDirection.Down); true }
+                else if (event.type == KeyEventType.KeyDown && event.key == Key.DirectionUp) { focusManager.moveFocus(FocusDirection.Up); true }
+                else false
+            }
+        )
         Spacer(Modifier.height(12.dp))
+        val empty = if (searching) filtered.isEmpty() else folders.isEmpty() && current.movies.isEmpty()
         when {
             loading -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { CircularProgressIndicator(color = Accent) }
-            filtered.isEmpty() -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { Text("No matching videos", fontSize = 22.sp) }
+            empty -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { Text("No matching videos", fontSize = 22.sp, color = Color.White) }
             else -> LazyColumn(
                 modifier = Modifier.fillMaxSize(),
                 verticalArrangement = Arrangement.spacedBy(8.dp),
                 contentPadding = PaddingValues(bottom = 24.dp)
             ) {
-                items(filtered, key = { it.id }) { movie -> MovieRow(movie = movie, onClick = { onPlay(movie) }) }
+                if (searching) {
+                    items(filtered, key = { it.id }) { movie ->
+                        MovieRow(movie = movie, onClick = { onPlay(movie) }, modifier = if (movie === filtered.first()) Modifier.focusRequester(firstItem) else Modifier)
+                    }
+                } else {
+                    items(folders, key = { "folder:" + it.segments.joinToString("/") }) { entry ->
+                        FolderRow(
+                            label = entry.label, count = entry.node.totalMovies,
+                            modifier = if (entry === folders.first()) Modifier.focusRequester(firstItem) else Modifier,
+                            onClick = { stack = stack + listOf(path + entry.segments) }
+                        )
+                    }
+                    items(current.movies, key = { it.id }) { movie ->
+                        MovieRow(
+                            movie = movie, onClick = { onPlay(movie) },
+                            modifier = if (folders.isEmpty() && movie === current.movies.first()) Modifier.focusRequester(firstItem) else Modifier
+                        )
+                    }
+                }
             }
+        }
+    }
+}
+
+@Composable
+private fun FolderRow(label: String, count: Int, modifier: Modifier = Modifier, onClick: () -> Unit) {
+    var focused by remember { mutableStateOf(false) }
+    Surface(
+        onClick = onClick,
+        color = if (focused) Color(0xFF33302A) else Panel,
+        shape = RoundedCornerShape(12.dp),
+        modifier = modifier.fillMaxWidth().onFocusChangedCompat { focused = it }
+    ) {
+        Row(Modifier.padding(horizontal = 18.dp, vertical = 14.dp), verticalAlignment = Alignment.CenterVertically) {
+            Box(Modifier.size(width = 56.dp, height = 56.dp).background(Color(0xFF292B31), RoundedCornerShape(8.dp)), contentAlignment = Alignment.Center) {
+                Text("DIR", color = Accent, fontWeight = FontWeight.Bold, fontSize = 12.sp)
+            }
+            Spacer(Modifier.width(16.dp))
+            Column(Modifier.weight(1f)) {
+                Text(label, fontSize = 18.sp, fontWeight = FontWeight.SemiBold, color = Color.White, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Text(if (count == 1) "1 video" else "$count videos", color = Muted, fontSize = 12.sp)
+            }
+            Text("OPEN  ›", color = Accent, fontWeight = FontWeight.Bold, fontSize = 13.sp)
         }
     }
 }
@@ -385,13 +537,13 @@ private fun TvActionButton(label: String, onClick: () -> Unit, enabled: Boolean 
 }
 
 @Composable
-private fun MovieRow(movie: Movie, onClick: () -> Unit) {
+private fun MovieRow(movie: Movie, onClick: () -> Unit, modifier: Modifier = Modifier) {
     var focused by remember { mutableStateOf(false) }
     Surface(
         onClick = onClick,
         color = if (focused) Color(0xFF33302A) else Panel,
         shape = RoundedCornerShape(12.dp),
-        modifier = Modifier.fillMaxWidth().onFocusChangedCompat { focused = it }
+        modifier = modifier.fillMaxWidth().onFocusChangedCompat { focused = it }
     ) {
         Row(Modifier.padding(horizontal = 18.dp, vertical = 14.dp), verticalAlignment = Alignment.CenterVertically) {
             Box(Modifier.size(width = 56.dp, height = 70.dp).background(Color(0xFF292B31), RoundedCornerShape(8.dp)), contentAlignment = Alignment.Center) {
@@ -411,38 +563,20 @@ private fun Modifier.onFocusChangedCompat(onChanged: (Boolean) -> Unit): Modifie
     onChanged(it.isFocused)
 }
 
+
 private const val CONTROLLER_TIMEOUT_MS = 5000
 
+/**
+ * Plays [movie] with the stock Media3 controller (seek bar, play/pause, subtitle and settings buttons),
+ * which is built for D-pad use. The PlayerView must hold focus or the remote's keys never reach it.
+ */
 @androidx.annotation.OptIn(UnstableApi::class)
 @OptIn(UnstableApi::class)
 @Composable
 private fun PlaybackScreen(movie: Movie, onBack: () -> Unit, getPlayer: (String) -> ExoPlayer) {
     val player = remember(movie.url) { getPlayer(movie.url) }
-    val context = LocalContext.current
     var playerView by remember { mutableStateOf<PlayerView?>(null) }
-    var controlsVisible by remember { mutableStateOf(true) }
     var playbackError by remember { mutableStateOf<String?>(null) }
-    var trackDialogOpen by remember { mutableStateOf(false) }
-
-    // Keep the controller (and the Audio/Subtitles buttons that follow it) on screen while a track
-    // dialog is open, then hand focus back to the player view so the controls can be reopened.
-    fun showTrackDialog(title: String, trackType: Int, allowDisable: Boolean) {
-        val activity = context as? Activity ?: return
-        val view = playerView
-        val builder = TrackSelectionDialogBuilder(activity, title, player, trackType)
-        if (allowDisable) builder.setShowDisableOption(true)
-        val dialog = builder.build()
-        dialog.setOnDismissListener {
-            trackDialogOpen = false
-            view?.controllerShowTimeoutMs = CONTROLLER_TIMEOUT_MS
-            view?.showController()
-            view?.requestFocus()
-        }
-        trackDialogOpen = true
-        view?.controllerShowTimeoutMs = 0
-        view?.showController()
-        dialog.show()
-    }
 
     BackHandler(onBack = onBack)
 
@@ -463,7 +597,24 @@ private fun PlaybackScreen(movie: Movie, onBack: () -> Unit, getPlayer: (String)
         }
     }
 
-    Box(Modifier.fillMaxSize().background(Color.Black)) {
+    // A plain View.requestFocus() is ignored while the Compose host holds focus, so go through Compose's
+    // focus system, which hands focus to the embedded PlayerView.
+    val playerFocus = remember { FocusRequester() }
+    LaunchedEffect(playerView) {
+        val view = playerView ?: return@LaunchedEffect
+        runCatching { playerFocus.requestFocus() }
+        view.post { view.requestFocus(); view.showController() }
+    }
+
+    Box(
+        Modifier.fillMaxSize().background(Color.Black).onPreviewKeyEvent { event ->
+            // Safety net: if the PlayerView still lacks focus, give it the key so the controller can appear.
+            val view = playerView
+            if (view != null && !view.hasFocus() && event.type == KeyEventType.KeyDown && event.key != Key.Back) {
+                view.dispatchKeyEvent(event.nativeKeyEvent)
+            } else false
+        }
+    ) {
         AndroidView(
             factory = { viewContext ->
                 PlayerView(viewContext).apply {
@@ -471,37 +622,20 @@ private fun PlaybackScreen(movie: Movie, onBack: () -> Unit, getPlayer: (String)
                     useController = true
                     controllerAutoShow = true
                     controllerShowTimeoutMs = CONTROLLER_TIMEOUT_MS
+                    setShowSubtitleButton(true)
                     setShowBuffering(PlayerView.SHOW_BUFFERING_WHEN_PLAYING)
                     keepScreenOn = true
                     isFocusable = true
                     isFocusableInTouchMode = true
-                    setControllerVisibilityListener(PlayerView.ControllerVisibilityListener { visibility ->
-                        controlsVisible = visibility == View.VISIBLE
-                    })
                     playerView = this
-                    requestFocus()
                 }
             },
             update = { view ->
-                playerView = view
                 if (view.player !== player) view.player = player
                 view.useController = true
             },
-            modifier = Modifier.fillMaxSize().background(Color.Black)
+            modifier = Modifier.fillMaxSize().background(Color.Black).focusRequester(playerFocus)
         )
-
-        // These actions follow the native player's controller visibility, so they don't
-        // permanently cover the movie. The native controller supplies seek/play/pause.
-        if (controlsVisible || trackDialogOpen) {
-            Row(
-                modifier = Modifier.align(Alignment.TopEnd).padding(20.dp),
-                horizontalArrangement = Arrangement.spacedBy(10.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                TvActionButton("Audio", onClick = { showTrackDialog("Audio track", C.TRACK_TYPE_AUDIO, false) })
-                TvActionButton("Subtitles", onClick = { showTrackDialog("Subtitles", C.TRACK_TYPE_TEXT, true) })
-            }
-        }
 
         if (playbackError != null) {
             Surface(
