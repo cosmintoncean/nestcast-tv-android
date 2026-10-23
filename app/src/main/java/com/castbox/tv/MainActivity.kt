@@ -24,9 +24,7 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.onFocusChanged
-import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.input.key.Key
@@ -246,6 +244,20 @@ private fun ServerSourcesScreen(
         Text("CASTBOX", color = Accent, fontSize = 15.sp, fontWeight = FontWeight.Bold, letterSpacing = 5.sp)
         Text("Your media PCs", fontSize = 32.sp, fontWeight = FontWeight.Bold, color = Color.White)
         Text("Add each Windows PC once. CastBox combines their libraries and streams each movie from its source PC.", color = Muted, fontSize = 16.sp)
+        Button(
+            onClick = onConnect,
+            enabled = !loading && servers.isNotEmpty(),
+            modifier = Modifier.height(54.dp)
+        ) {
+            if (loading) {
+                CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp, color = Color.Black)
+                Spacer(Modifier.width(8.dp))
+            }
+            Text(if (loading) "Connecting to unified library…" else "Open unified library", fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+        }
+        if (servers.isEmpty()) {
+            Text("Add a PC below to get started. Once at least one PC is configured, this button opens the unified library.", color = Muted, fontSize = 14.sp)
+        }
         Surface(color = Panel, shape = RoundedCornerShape(16.dp), modifier = Modifier.fillMaxWidth().widthIn(max = 850.dp)) {
             Column(Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 Text("Add a media server", fontWeight = FontWeight.SemiBold, fontSize = 18.sp)
@@ -253,10 +265,6 @@ private fun ServerSourcesScreen(
                 OutlinedTextField(value = address, onValueChange = { address = it }, singleLine = true, label = { Text("Server URL") }, placeholder = { Text("http://192.168.1.25:5078") }, modifier = Modifier.fillMaxWidth())
                 Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                     Button(onClick = { onAdd(name, address); if (address.trim().startsWith("http")) { name = ""; address = "" } }) { Text("Add PC") }
-                    Button(onClick = onConnect, enabled = !loading && servers.isNotEmpty()) {
-                        if (loading) { CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp, color = Color.Black); Spacer(Modifier.width(8.dp)) }
-                        Text(if (loading) "Connecting…" else "Connect to library")
-                    }
                     if (servers.isNotEmpty()) OutlinedButton(onClick = onBackToLibrary) { Text("Cancel") }
                 }
                 if (error.isNotBlank()) Text(error, color = Color(0xFFFFB4A8), fontSize = 14.sp)
@@ -405,6 +413,7 @@ private fun Modifier.onFocusChangedCompat(onChanged: (Boolean) -> Unit): Modifie
 
 private const val CONTROLLER_TIMEOUT_MS = 5000
 
+@androidx.annotation.OptIn(UnstableApi::class)
 @OptIn(UnstableApi::class)
 @Composable
 private fun PlaybackScreen(movie: Movie, onBack: () -> Unit, getPlayer: (String) -> ExoPlayer) {
