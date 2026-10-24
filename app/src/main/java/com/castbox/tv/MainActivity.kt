@@ -352,7 +352,7 @@ private class LibraryResult(
 
 /** Fetches every server at the same time so one offline PC doesn't delay the others. */
 private suspend fun loadLibraries(servers: List<MediaServer>): LibraryResult = coroutineScope {
-    val accountOf = java.util.concurrent.ConcurrentHashMap<String, PcAccount?>()
+    val accountOf = java.util.concurrent.ConcurrentHashMap<String, PcAccount>()
     val results = servers.map { original ->
         async(Dispatchers.IO) {
             val (resolved, note) = resolveServer(original)
@@ -373,7 +373,8 @@ private suspend fun loadLibraries(servers: List<MediaServer>): LibraryResult = c
                     )
                 }
             }
-            accountOf[source.baseUrl] = account
+            // ConcurrentHashMap rejects null values: a PC without an account simply has no entry.
+            if (account != null) accountOf[source.baseUrl] = account
             Triple(source, library, note)
         }
     }.awaitAll()
