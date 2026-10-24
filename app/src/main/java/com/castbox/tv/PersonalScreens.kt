@@ -24,20 +24,22 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.grid.GridCells
-import androidx.compose.foundation.lazy.grid.GridItemSpan
 import androidx.compose.foundation.lazy.grid.LazyGridState
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
-import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -60,24 +62,48 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import coil.compose.AsyncImage
 import coil.request.ImageRequest
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
-import org.json.JSONArray
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import org.json.JSONObject
 import java.net.HttpURLConnection
 import java.net.URL
-import java.util.TreeMap
+import java.net.URLEncoder
+import java.text.NumberFormat
 
 /** Marks a video as coming from a personal folder: it resumes like any video but is never reported to MediaLog. */
 const val PERSONAL_PREFIX = "personal|"
 
+private const val PAGE_SIZE = 120
 private val PBg = Color(0xFF101114)
 private val PPanel = Color(0xFF1A1C21)
 private val PAccent = Color(0xFFFFB139)
 private val PMuted = Color(0xFF9CA3AF)
 
-/** One picture or video from a PC's personal folders (GET /api/personal, servers 0.4.0+). */
+private fun count(n: Int): String = NumberFormat.getIntegerInstance().format(n)
+
+// ------------------------------------------------------------------------------------------------------------
+// What the PCs share (GET /api/personal/roots and /api/personal/browse, servers 0.5.0+)
+//
+// A personal library can hold hundreds of thousands of pictures, so nothing here ever loads "everything":
+// the top level is a handful of folders, and a folder is read one page at a time as the person scrolls.
+// ------------------------------------------------------------------------------------------------------------
+
+/** One shared folder on one PC; [index] is the PC's number for it. */
+class PersonalRoot(val pc: MediaServer, val index: Int, val name: String, val items: Int, val coverUrl: String?)
+
+/** All shared folders of all PCs, with the totals for the home screen. */
+class PersonalSummary(val pictures: Int, val videos: Int, val roots: List<PersonalRoot>) {
+    val isEmpty get() = roots.isEmpty()
+}
+
+class PersonalFolderEntry(val name: String, val items: Int, val coverUrl: String?)
+
+/** One picture or video of a personal folder. */
 class PersonalItem(
     val id: String, val isImage: Boolean, val title: String, val fileName: String, val sizeBytes: Long,
-    val url: String, val thumbUrl: String?, val folderPath: List<String>, val modifiedMs: Long, val pc: String
+    val url: String, val thumbUrl: String?, val folderPath: List<String>, val pc: String
 ) {
     /** A video as the player and watch store know it; its key marks it personal so nothing is reported. */
     fun asMovie() = Movie(
@@ -86,49 +112,12 @@ class PersonalItem(
     )
 }
 
-/** A folder in the personal tree: sub-folders plus the pictures and videos directly inside it. */
-class PersonalNode(val name: String) {
-    val children = TreeMap<String, PersonalNode>(String.CASE_INSENSITIVE_ORDER)
-    val items = mutableListOf<PersonalItem>()
-    var total = 0
-
-    fun all(): List<PersonalItem> = items + children.values.flatMap { it.all() }
-    /** A picture to stand for the folder: the first one inside it or in any folder below. */
-    fun cover(): String? = items.firstOrNull { it.thumbUrl != null }?.thumbUrl ?: children.values.firstNotNullOfOrNull { it.cover() }
+/** A folder to look at: a shared root plus the folders opened below it. */
+class PersonalLocation(val root: PersonalRoot, val segments: List<String>) {
+    val key: String get() = "${root.pc.baseUrl}|${root.index}|" + segments.joinToString("/")
 }
 
-fun buildPersonalTree(items: List<PersonalItem>): PersonalNode {
-    val root = PersonalNode("")
-    for (item in items) {
-        var node = root
-        node.total++
-        for (segment in item.folderPath) {
-            node = node.children.getOrPut(segment) { PersonalNode(segment) }
-            node.total++
-        }
-        node.items += item
-    }
-    return root
-}
-
-/** Skips straight into a folder that holds nothing but one other folder, as the movie library does. */
-fun PersonalNode.initialPath(): List<String> {
-    val path = mutableListOf<String>()
-    var node = this
-    while (node.items.isEmpty() && node.children.size == 1) { node = node.children.values.first(); path += node.name }
-    return path
-}
-
-/** The folder actually shown: what the person opened, but never above the first real folder. */
-fun PersonalNode.effectivePath(open: List<String>): List<String> = initialPath().let { base -> if (open.size < base.size) base else open }
-
-private fun PersonalNode.resolve(path: List<String>): PersonalNode {
-    var node = this
-    for (segment in path) node = node.children[segment] ?: return node
-    return node
-}
-
-/** How many personal folders a PC shares (/api/health, servers 0.4.0+); 0 for older servers or when unreachable. */
+/** How many shared folders a PC has (/api/health, servers 0.4.0+); 0 for older servers or when unreachable. */
 fun fetchPersonalFolderCount(base: String): Int = runCatching {
     val connection = (URL(base.trimEnd('/') + "/api/health").openConnection() as HttpURLConnection).apply {
         connectTimeout = 1500
@@ -136,36 +125,105 @@ fun fetchPersonalFolderCount(base: String): Int = runCatching {
     }
     try {
         if (connection.responseCode !in 200..299) 0
-        else org.json.JSONObject(connection.inputStream.bufferedReader().use { it.readText() }).optInt("personalFolders", 0)
+        else JSONObject(connection.inputStream.bufferedReader().use { it.readText() }).optInt("personalFolders", 0)
     } finally { connection.disconnect() }
 }.getOrDefault(0)
 
-/** The pictures and videos a PC shares; [pcName] is shown as the top folder when several PCs are combined. */
-fun fetchPersonal(base: String, pcName: String, prefixWithPc: Boolean): List<PersonalItem> {
-    val connection = (URL(base.trimEnd('/') + "/api/personal").openConnection() as HttpURLConnection).apply {
+private fun getJson(url: String, readTimeoutMs: Int): JSONObject {
+    val connection = (URL(url).openConnection() as HttpURLConnection).apply {
         connectTimeout = 3000
-        readTimeout = 30000
+        readTimeout = readTimeoutMs
     }
     try {
         if (connection.responseCode !in 200..299) error("HTTP ${connection.responseCode}")
-        val array = JSONArray(connection.inputStream.bufferedReader().use { it.readText() })
-        return (0 until array.length()).mapNotNull { i ->
-            val o = array.optJSONObject(i) ?: return@mapNotNull null
-            val url = o.optString("url")
-            if (!url.startsWith("http")) return@mapNotNull null
-            val folders = (if (prefixWithPc) listOf(pcName) else emptyList()) +
-                listOf(o.optString("rootName")).filter { it.isNotBlank() } +
-                o.optString("relativeFolder").split('/', '\\').filter { it.isNotBlank() }
-            val modified = runCatching { java.time.Instant.parse(o.optString("modifiedUtc")).toEpochMilli() }.getOrDefault(0L)
-            PersonalItem(
-                id = o.optString("id"), isImage = o.optString("kind") == "image", title = o.optString("title"),
-                fileName = o.optString("fileName"), sizeBytes = o.optLong("sizeBytes"), url = url,
-                thumbUrl = o.optString("thumbUrl").takeIf { it.startsWith("http") }, folderPath = folders,
-                modifiedMs = modified, pc = pcName
-            )
-        }
+        return JSONObject(connection.inputStream.bufferedReader().use { it.readText() })
     } finally { connection.disconnect() }
 }
+
+/** The shared folders of one PC and the totals; throws for servers that predate the browse API (0.5.0). */
+fun fetchPersonalRoots(server: MediaServer, prefixWithPc: Boolean): PersonalSummary {
+    // The first request after the server starts waits for it to read the folders, which can take a while.
+    val o = getJson(server.baseUrl.trimEnd('/') + "/api/personal/roots", 60_000)
+    val roots = o.optJSONArray("roots")
+    val list = (0 until (roots?.length() ?: 0)).mapNotNull { i ->
+        val r = roots!!.optJSONObject(i) ?: return@mapNotNull null
+        val name = r.optString("name")
+        PersonalRoot(server, r.optInt("index"), if (prefixWithPc) "${server.name}  ›  $name" else name, r.optInt("items"), r.optString("coverUrl").takeIf { it.startsWith("http") })
+    }
+    return PersonalSummary(o.optInt("pictures"), o.optInt("videos"), list)
+}
+
+private class Page(val items: Int, val hasMore: Boolean, val folders: List<PersonalFolderEntry>, val files: List<PersonalItem>)
+
+private fun fetchBrowse(location: PersonalLocation, offset: Int, limit: Int): Page {
+    val path = URLEncoder.encode(location.segments.joinToString("/"), "UTF-8")
+    val o = getJson(
+        location.root.pc.baseUrl.trimEnd('/') + "/api/personal/browse?root=${location.root.index}&path=$path&offset=$offset&limit=$limit", 30_000
+    )
+    val folders = o.optJSONArray("folders")
+    val files = o.optJSONArray("files")
+    val shown = listOf(location.root.name) + location.segments
+    return Page(
+        items = o.optInt("items"), hasMore = o.optBoolean("hasMore"),
+        folders = (0 until (folders?.length() ?: 0)).mapNotNull { i ->
+            folders!!.optJSONObject(i)?.let { PersonalFolderEntry(it.optString("name"), it.optInt("items"), it.optString("coverUrl").takeIf { u -> u.startsWith("http") }) }
+        },
+        files = (0 until (files?.length() ?: 0)).mapNotNull { i ->
+            val f = files!!.optJSONObject(i) ?: return@mapNotNull null
+            val url = f.optString("url")
+            if (!url.startsWith("http")) return@mapNotNull null
+            PersonalItem(
+                id = f.optString("id"), isImage = f.optString("kind") == "image", title = f.optString("title"),
+                fileName = f.optString("fileName"), sizeBytes = f.optLong("sizeBytes"), url = url,
+                thumbUrl = f.optString("thumbUrl").takeIf { it.startsWith("http") }, folderPath = shown, pc = location.root.pc.name
+            )
+        }
+    )
+}
+
+/** What has been read of one folder so far; more pages are added as the person scrolls or swipes through the pictures. */
+class PersonalFolderState(val location: PersonalLocation) {
+    val folders = mutableStateListOf<PersonalFolderEntry>()
+    val files = mutableStateListOf<PersonalItem>()
+    /** Just the pictures of [files], in the same order, for the viewer. */
+    val images = mutableStateListOf<PersonalItem>()
+    var totalItems by mutableIntStateOf(0)
+    var hasMore by mutableStateOf(true)
+    var loading by mutableStateOf(false)
+    var error by mutableStateOf<String?>(null)
+    private var first = true
+
+    suspend fun loadMore() {
+        if (loading || !hasMore) return
+        loading = true
+        try {
+            val page = withContext(Dispatchers.IO) { fetchBrowse(location, files.size, PAGE_SIZE) }
+            if (first) { folders += page.folders; totalItems = page.items; first = false }
+            files += page.files
+            images += page.files.filter { it.isImage }
+            hasMore = page.hasMore
+            error = null
+        } catch (e: kotlin.coroutines.cancellation.CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            error = e.message ?: "Couldn't load this folder"
+            hasMore = false
+        } finally { loading = false }
+    }
+}
+
+/** The folders read so far and where each grid was scrolled to, kept while the person moves between folders and the viewer. */
+class PersonalStates {
+    private val folders = HashMap<String, PersonalFolderState>()
+    private val grids = HashMap<String, LazyGridState>()
+    fun folder(location: PersonalLocation) = folders.getOrPut(location.key) { PersonalFolderState(location) }
+    fun grid(key: String) = grids.getOrPut(key) { LazyGridState() }
+    fun clear() { folders.clear(); grids.clear() }
+}
+
+/** The folder to show: the one opened, or the only shared folder when there is just one. null is the list of shared folders. */
+fun effectiveLocation(summary: PersonalSummary, opened: PersonalLocation?): PersonalLocation? =
+    opened ?: summary.roots.singleOrNull()?.let { PersonalLocation(it, emptyList()) }
 
 // ------------------------------------------------------------------------------------------------------------
 // Home: the two places to go
@@ -183,12 +241,12 @@ fun HomeScreen(movieCount: Int, pictureCount: Int, videoCount: Int, onMovies: ()
         Spacer(Modifier.height(36.dp))
         Row(horizontalArrangement = Arrangement.spacedBy(28.dp)) {
             HomeCard(
-                title = "Movies & Shows", subtitle = if (movieCount == 1) "1 video" else "$movieCount videos",
+                title = "Movies & Shows", subtitle = if (movieCount == 1) "1 video" else "${count(movieCount)} videos",
                 glyph = "▶", from = Color(0xFF3A2A10), to = Color(0xFF1A1C21), onClick = onMovies, modifier = Modifier.focusRequester(first)
             )
             val personalText = buildList {
-                if (pictureCount > 0) add(if (pictureCount == 1) "1 picture" else "$pictureCount pictures")
-                if (videoCount > 0) add(if (videoCount == 1) "1 video" else "$videoCount videos")
+                if (pictureCount > 0) add(if (pictureCount == 1) "1 picture" else "${count(pictureCount)} pictures")
+                if (videoCount > 0) add(if (videoCount == 1) "1 video" else "${count(videoCount)} videos")
             }.joinToString("  •  ").ifBlank { "Nothing yet" }
             HomeCard(title = "Personal", subtitle = personalText, glyph = "❀", from = Color(0xFF14313A), to = Color(0xFF1A1C21), onClick = onPersonal)
         }
@@ -238,54 +296,86 @@ private fun PersonalActionButton(label: String, onClick: () -> Unit) {
 // Personal: folders and thumbnails
 // ------------------------------------------------------------------------------------------------------------
 
+/**
+ * The folder at [location]; null is the list of shared folders. Back climbs one folder at a time and finally returns home.
+ * Pass the result of [effectiveLocation] so a lone shared folder is opened straight away.
+ */
 @Composable
 fun PersonalScreen(
-    items: List<PersonalItem>, tree: PersonalNode, openPath: List<String>, onOpenPathChange: (List<String>) -> Unit,
-    lastOpenedId: String, onBackHome: () -> Unit, onViewImage: (PersonalItem) -> Unit, onPlayVideo: (PersonalItem) -> Unit,
-    gridState: LazyGridState
+    summary: PersonalSummary, location: PersonalLocation?, states: PersonalStates, onOpen: (PersonalLocation?) -> Unit,
+    lastOpenedId: String, onBackHome: () -> Unit, onViewImage: (PersonalFolderState, PersonalItem) -> Unit, onPlayVideo: (PersonalItem) -> Unit
 ) {
-    val base = remember(tree) { tree.initialPath() }
-    val path = tree.effectivePath(openPath)
-    val current = remember(tree, path) { tree.resolve(path) }
-    val folders = remember(current) { current.children.values.toList() }
-    val media = remember(current) { current.items.sortedWith(compareBy({ !it.isImage }, { it.title.lowercase() })) }
+    val state = location?.let { states.folder(it) }
+    val gridState = states.grid(location?.key ?: "top")
     val firstItem = remember { FocusRequester() }
-    BackHandler { if (path.size <= base.size) onBackHome() else onOpenPathChange(path.dropLast(1)) }
-    // Hand focus to the picture last viewed, else the first tile, whenever the folder changes.
-    LaunchedEffect(current) {
-        // A lazy grid only attaches the tiles near the screen, so bring the wanted tile into view before asking for focus.
-        val target = media.indexOfFirst { it.id == lastOpenedId }
-        if (target >= 0) runCatching { gridState.scrollToItem(folders.size + target) }
+    val onlyRoot = summary.roots.size == 1
+    BackHandler {
+        when {
+            location == null -> onBackHome()
+            location.segments.isNotEmpty() -> onOpen(PersonalLocation(location.root, location.segments.dropLast(1)))
+            onlyRoot -> onBackHome()
+            else -> onOpen(null)
+        }
+    }
+
+    // The first page, and the next ones as the person scrolls near the end of what has been read.
+    LaunchedEffect(state) { if (state != null && state.files.isEmpty() && state.hasMore) state.loadMore() }
+    LaunchedEffect(state, gridState) {
+        if (state == null) return@LaunchedEffect
+        snapshotFlow { gridState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0 }.collect { last ->
+            if (state.hasMore && !state.loading && last >= state.folders.size + state.files.size - 40) state.loadMore()
+        }
+    }
+    // Hand focus to the picture last viewed, else the first tile, whenever the folder changes (once its tiles exist).
+    LaunchedEffect(location?.key, state?.files?.isEmpty()) {
+        val target = state?.files?.indexOfFirst { it.id == lastOpenedId } ?: -1
+        if (target >= 0) runCatching { gridState.scrollToItem((state?.folders?.size ?: 0) + target) }
         delay(120)
         runCatching { firstItem.requestFocus() }
     }
 
     Column(Modifier.fillMaxSize().background(PBg).padding(horizontal = 42.dp, vertical = 24.dp)) {
         Text("CASTBOX", color = PAccent, fontSize = 14.sp, fontWeight = FontWeight.Bold, letterSpacing = 4.sp)
-        Text(if (path.size <= base.size) "Personal" else path.last(), fontSize = 32.sp, fontWeight = FontWeight.Bold, color = Color.White, maxLines = 1, overflow = TextOverflow.Ellipsis)
-        val pictures = items.count { it.isImage }; val videos = items.size - pictures
-        val where = if (path.isEmpty()) "All folders" else path.joinToString("  ›  ")
-        Text("$pictures pictures  •  $videos videos  •  $where", color = PMuted, fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        val title = when {
+            location == null -> "Personal"
+            location.segments.isEmpty() -> if (onlyRoot) "Personal" else location.root.name
+            else -> location.segments.last()
+        }
+        Text(title, fontSize = 32.sp, fontWeight = FontWeight.Bold, color = Color.White, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        val where = if (location == null) "${count(summary.roots.size)} folders" else (listOf(location.root.name) + location.segments).joinToString("  ›  ")
+        val total = if (state != null) "${count(state.totalItems)} items  •  " else "${count(summary.pictures)} pictures  •  ${count(summary.videos)} videos  •  "
+        Text(total + where, color = PMuted, fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
         Spacer(Modifier.height(16.dp))
-        if (folders.isEmpty() && media.isEmpty()) {
-            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { Text("Nothing here", fontSize = 22.sp, color = Color.White) }
-        } else {
-            LazyVerticalGrid(
+
+        val entries: List<PersonalFolderEntry> = if (state == null) summary.roots.map { PersonalFolderEntry(it.name, it.items, it.coverUrl) } else state.folders
+        val files: List<PersonalItem> = state?.files ?: emptyList()
+        when {
+            state != null && state.error != null && files.isEmpty() && entries.isEmpty() ->
+                Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { Text("Couldn't open this folder: ${state.error}", fontSize = 18.sp, color = Color(0xFFFFB4A8)) }
+            state != null && state.loading && files.isEmpty() && entries.isEmpty() ->
+                Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { CircularProgressIndicator(color = PAccent) }
+            entries.isEmpty() && files.isEmpty() ->
+                Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { Text("Nothing here", fontSize = 22.sp, color = Color.White) }
+            else -> LazyVerticalGrid(
                 columns = GridCells.Adaptive(minSize = 230.dp), state = gridState, modifier = Modifier.fillMaxSize(),
                 horizontalArrangement = Arrangement.spacedBy(16.dp), verticalArrangement = Arrangement.spacedBy(16.dp),
                 contentPadding = PaddingValues(bottom = 32.dp, top = 8.dp, start = 8.dp, end = 8.dp)
             ) {
-                val focusTarget = media.firstOrNull { it.id == lastOpenedId }?.id
-                items(folders, key = { "folder:" + it.name }) { node ->
+                val focusTarget = files.firstOrNull { it.id == lastOpenedId }?.id
+                items(entries, key = { "folder:" + it.name }) { entry ->
                     FolderTile(
-                        node, onClick = { onOpenPathChange(path + node.name) },
-                        modifier = if (focusTarget == null && node === folders.first()) Modifier.focusRequester(firstItem) else Modifier
+                        entry,
+                        onClick = {
+                            if (location == null) onOpen(PersonalLocation(summary.roots.first { it.name == entry.name }, emptyList()))
+                            else onOpen(PersonalLocation(location.root, location.segments + entry.name))
+                        },
+                        modifier = if (focusTarget == null && entry === entries.first()) Modifier.focusRequester(firstItem) else Modifier
                     )
                 }
-                items(media, key = { it.id }) { item ->
+                items(files, key = { it.id }) { item ->
                     MediaTile(
-                        item, onClick = { if (item.isImage) onViewImage(item) else onPlayVideo(item) },
-                        modifier = if (item.id == focusTarget || (focusTarget == null && folders.isEmpty() && item === media.first())) Modifier.focusRequester(firstItem) else Modifier
+                        item, onClick = { if (item.isImage) onViewImage(state!!, item) else onPlayVideo(item) },
+                        modifier = if (item.id == focusTarget || (focusTarget == null && entries.isEmpty() && item === files.first())) Modifier.focusRequester(firstItem) else Modifier
                     )
                 }
             }
@@ -294,10 +384,9 @@ fun PersonalScreen(
 }
 
 @Composable
-private fun FolderTile(node: PersonalNode, onClick: () -> Unit, modifier: Modifier = Modifier) {
+private fun FolderTile(entry: PersonalFolderEntry, onClick: () -> Unit, modifier: Modifier = Modifier) {
     var focused by remember { mutableStateOf(false) }
     val scale by animateFloatAsState(if (focused) 1.05f else 1f, label = "folderTileScale")
-    val cover = remember(node) { node.cover() }
     Box(
         modifier
             .aspectRatio(1.5f).scale(scale)
@@ -306,12 +395,12 @@ private fun FolderTile(node: PersonalNode, onClick: () -> Unit, modifier: Modifi
             .onFocusChanged { focused = it.isFocused }
             .clickable(onClick = onClick)
     ) {
-        if (cover != null) AsyncImage(model = cover, contentDescription = null, contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize())
+        if (entry.coverUrl != null) AsyncImage(model = entry.coverUrl, contentDescription = null, contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize())
         else Text("📁", fontSize = 48.sp, modifier = Modifier.align(Alignment.Center))
         Box(Modifier.fillMaxSize().background(Brush.verticalGradient(listOf(Color.Transparent, Color(0xDD000000)), startY = 90f)))
         Column(Modifier.align(Alignment.BottomStart).padding(14.dp)) {
-            Text(node.name, color = Color.White, fontSize = 18.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
-            Text(if (node.total == 1) "1 item" else "${node.total} items", color = Color(0xFFD0D3DA), fontSize = 12.sp)
+            Text(entry.name, color = Color.White, fontSize = 18.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Text(if (entry.items == 1) "1 item" else "${count(entry.items)} items", color = Color(0xFFD0D3DA), fontSize = 12.sp)
         }
     }
 }
@@ -354,29 +443,45 @@ private fun MediaTile(item: PersonalItem, onClick: () -> Unit, modifier: Modifie
 // Viewer: one picture at a time, with an optional slideshow
 // ------------------------------------------------------------------------------------------------------------
 
-/** Full-screen pictures of one folder. Left/right move, OK starts or stops the slideshow, Back returns to the grid. */
+/**
+ * Full-screen pictures of one folder. Left/right move (reading more of a big folder as needed), OK starts or stops the
+ * slideshow, Back returns to the grid.
+ */
 @Composable
-fun PhotoViewer(pictures: List<PersonalItem>, startId: String, onClose: () -> Unit, onShown: (PersonalItem) -> Unit) {
+fun PhotoViewer(state: PersonalFolderState, startId: String, onClose: () -> Unit, onShown: (PersonalItem) -> Unit) {
+    val pictures = state.images
     var index by remember { mutableIntStateOf(pictures.indexOfFirst { it.id == startId }.coerceAtLeast(0)) }
     var slideshow by remember { mutableStateOf(false) }
     var hudUntil by remember { mutableStateOf(System.currentTimeMillis() + 4000) }
     var hudVisible by remember { mutableStateOf(true) }
     val focus = remember { FocusRequester() }
     val context = LocalContext.current
-    val current = pictures[index]
+    val scope = rememberCoroutineScope()
+    if (pictures.isEmpty()) { onClose(); return }
+    val current = pictures[index.coerceIn(0, pictures.size - 1)]
 
-    fun go(step: Int) { index = (index + step + pictures.size) % pictures.size; hudUntil = System.currentTimeMillis() + 4000 }
+    fun go(step: Int) {
+        hudUntil = System.currentTimeMillis() + 4000
+        val next = index + step
+        when {
+            next in pictures.indices -> index = next
+            next >= pictures.size && state.hasMore -> scope.launch { state.loadMore(); if (index + 1 < pictures.size) index += 1 }
+            next >= pictures.size -> index = 0
+            else -> index = pictures.size - 1
+        }
+    }
     BackHandler(onBack = onClose)
     LaunchedEffect(Unit) { runCatching { focus.requestFocus() } }
     LaunchedEffect(index) {
-        onShown(pictures[index])
-        // Load the next picture ahead of time so a slideshow never waits.
-        pictures.getOrNull((index + 1) % pictures.size)?.let { next ->
+        onShown(pictures[index.coerceIn(0, pictures.size - 1)])
+        // Read ahead in a big folder, and load the next picture so a slideshow never waits.
+        if (state.hasMore && index >= pictures.size - 5) state.loadMore()
+        pictures.getOrNull(index + 1)?.let { next ->
             coil.Coil.imageLoader(context).enqueue(ImageRequest.Builder(context).data(next.url).build())
         }
     }
     LaunchedEffect(slideshow, index) {
-        if (slideshow && pictures.size > 1) { delay(7000); go(1) }
+        if (slideshow && (pictures.size > 1 || state.hasMore)) { delay(7000); go(1) }
     }
     LaunchedEffect(hudUntil) {
         hudVisible = true
@@ -410,15 +515,9 @@ fun PhotoViewer(pictures: List<PersonalItem>, startId: String, onClose: () -> Un
                     Text(current.title, color = Color.White, fontSize = 20.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
                     Text(current.folderPath.joinToString("  ›  "), color = PMuted, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 }
-                Text(
-                    (if (slideshow) "❚❚ Slideshow   " else "▶ OK for slideshow   ") + "${index + 1} / ${pictures.size}",
-                    color = PAccent, fontSize = 15.sp, fontWeight = FontWeight.Bold
-                )
+                val of = if (state.hasMore) "${index + 1}+" else "${index + 1} / ${pictures.size}"
+                Text((if (slideshow) "❚❚ Slideshow   " else "▶ OK for slideshow   ") + of, color = PAccent, fontSize = 15.sp, fontWeight = FontWeight.Bold)
             }
         }
     }
 }
-
-/** The pictures of a folder in the order the grid shows them, for the viewer's left/right. */
-fun PersonalNode.resolveForViewer(path: List<String>): List<PersonalItem> =
-    resolve(path).items.filter { it.isImage }.sortedBy { it.title.lowercase() }

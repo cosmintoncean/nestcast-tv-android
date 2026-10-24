@@ -31,7 +31,6 @@ import androidx.compose.ui.composed
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.layout.ContentScale
 import coil.compose.AsyncImage
-import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.ui.focus.FocusDirection
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
@@ -218,12 +217,12 @@ class MainActivity : ComponentActivity() {
             var accountList by remember { mutableStateOf<List<MediaAccount>>(emptyList()) }
             // "home" (movies or personal), "library" or "personal"; only PCs with personal folders make a home screen.
             var section by remember { mutableStateOf("library") }
-            var personalItems by remember { mutableStateOf<List<PersonalItem>>(emptyList()) }
-            val personalTree = remember(personalItems) { buildPersonalTree(personalItems) }
-            var personalPath by remember { mutableStateOf<List<String>>(emptyList()) }
+            var personalSummary by remember { mutableStateOf(PersonalSummary(0, 0, emptyList())) }
+            val personalStates = remember { PersonalStates() }
+            var personalOpened by remember { mutableStateOf<PersonalLocation?>(null) }
             var lastOpenedPersonal by remember { mutableStateOf("") }
-            var viewerStartId by remember { mutableStateOf<String?>(null) }
-            val personalGridState = rememberLazyGridState()
+            var viewerFolder by remember { mutableStateOf<PersonalFolderState?>(null) }
+            var viewerStartId by remember { mutableStateOf("") }
             var askWho by remember { mutableStateOf<Movie?>(null) }
 
             fun persistServers(updated: List<MediaServer>) {
@@ -283,8 +282,9 @@ class MainActivity : ComponentActivity() {
                                         } else {
                                             movies = result.movies; tree = result.tree
                                             accounts = result.accounts; accountList = result.accounts
-                                            personalItems = result.personal; personalPath = emptyList()
-                                            section = if (result.personal.isNotEmpty()) "home" else "library"
+                                            personalStates.clear(); personalOpened = null
+                                            personalSummary = result.personal
+                                            section = if (!result.personal.isEmpty) "home" else "library"
                                             openFolders = emptyList(); searchQuery = ""
                                             val unavailable = if (result.failed.isNotEmpty()) "Connected to ${servers.size - result.failed.size} of ${servers.size} PCs. Unavailable: ${result.failed.joinToString { it.name }}." else ""
                                             error = listOf(unavailable, result.notes).filter { it.isNotBlank() }.joinToString(" ")
@@ -296,27 +296,26 @@ class MainActivity : ComponentActivity() {
                         },
                         onBackToLibrary = { if (isConnected) manageSources = false }
                     )
-                } else if (viewerStartId != null) {
-                    val folder = remember(personalTree, personalPath, viewerStartId) { personalTree.resolveForViewer(personalTree.effectivePath(personalPath)) }
+                } else if (viewerFolder != null) {
                     PhotoViewer(
-                        pictures = folder, startId = viewerStartId!!,
-                        onClose = { viewerStartId = null },
+                        state = viewerFolder!!, startId = viewerStartId,
+                        onClose = { viewerFolder = null },
                         onShown = { lastOpenedPersonal = it.id }
                     )
                 } else if (section == "home") {
                     HomeScreen(
                         movieCount = movies.size,
-                        pictureCount = personalItems.count { it.isImage }, videoCount = personalItems.count { !it.isImage },
+                        pictureCount = personalSummary.pictures, videoCount = personalSummary.videos,
                         onMovies = { section = "library" }, onPersonal = { section = "personal" },
                         onChangeServer = { manageSources = true }
                     )
                 } else if (section == "personal") {
                     PersonalScreen(
-                        items = personalItems, tree = personalTree, openPath = personalPath, onOpenPathChange = { personalPath = it },
-                        lastOpenedId = lastOpenedPersonal, onBackHome = { section = "home" },
-                        onViewImage = { lastOpenedPersonal = it.id; viewerStartId = it.id },
-                        onPlayVideo = { lastOpenedPersonal = it.id; selected = it.asMovie() },
-                        gridState = personalGridState
+                        summary = personalSummary, location = effectiveLocation(personalSummary, personalOpened), states = personalStates,
+                        onOpen = { personalOpened = it },
+                        lastOpenedId = lastOpenedPersonal, onBackHome = { personalOpened = null; section = "home" },
+                        onViewImage = { folder, item -> lastOpenedPersonal = item.id; viewerStartId = item.id; viewerFolder = folder },
+                        onPlayVideo = { lastOpenedPersonal = it.id; selected = it.asMovie() }
                     )
                 } else {
                     LibraryScreen(
@@ -327,7 +326,7 @@ class MainActivity : ComponentActivity() {
                         lastPlayedId = lastPlayedId,
                         loading = loading, error = error,
                         onBackToConnect = { manageSources = true },
-                        onHome = if (personalItems.isNotEmpty()) ({ section = "home" }) else null,
+                        onHome = if (!personalSummary.isEmpty) ({ section = "home" }) else null,
                         onRefresh = {
                             loading = true; error = ""
                             lifecycleScope.launch {
@@ -336,8 +335,8 @@ class MainActivity : ComponentActivity() {
                                     if (result.servers != servers) persistServers(result.servers)
                                     movies = result.movies; tree = result.tree
                                     accounts = result.accounts; accountList = result.accounts
-                                    personalItems = result.personal
-                                    if (result.personal.isEmpty() && section != "library") section = "library"
+                                    personalStates.clear(); personalSummary = result.personal
+                                    if (result.personal.isEmpty && section != "library") section = "library"
                                     val problem = if (result.failed.isNotEmpty()) "Unavailable sources: ${result.failed.joinToString { it.name }}" else if (movies.isEmpty()) "No videos found. Check the PCs and media folders." else ""
                                     error = listOf(problem, result.notes).filter { it.isNotBlank() }.joinToString(" ")
                                 } catch (e: Exception) { error = "Refresh failed: ${e.message ?: "check network"}" }
@@ -385,13 +384,13 @@ private class LibraryResult(
     /** The servers as they should be saved: addresses and IDs may have been updated. */
     val servers: List<MediaServer>, val notes: String,
     val accounts: List<MediaAccount> = emptyList(),
-    val personal: List<PersonalItem> = emptyList()
+    val personal: PersonalSummary = PersonalSummary(0, 0, emptyList())
 )
 
 /** Fetches every server at the same time so one offline PC doesn't delay the others. */
 private suspend fun loadLibraries(servers: List<MediaServer>): LibraryResult = coroutineScope {
     val accountOf = java.util.concurrent.ConcurrentHashMap<String, PcAccount>()
-    val personalOf = java.util.concurrent.ConcurrentHashMap<String, List<PersonalItem>>()
+    val personalOf = java.util.concurrent.ConcurrentHashMap<String, PersonalSummary>()
     val results = servers.map { original ->
         async(Dispatchers.IO) {
             val (resolved, note) = resolveServer(original)
@@ -403,7 +402,7 @@ private suspend fun loadLibraries(servers: List<MediaServer>): LibraryResult = c
             val source = learned
             // Personal folders (pictures and videos) are listed separately; PCs without any, or older servers, add nothing.
             if (raw.isSuccess && fetchPersonalFolderCount(source.baseUrl) > 0) {
-                runCatching { fetchPersonal(source.baseUrl, source.name, servers.size > 1) }.getOrNull()?.let { personalOf[source.baseUrl] = it }
+                runCatching { fetchPersonalRoots(source, servers.size > 1) }.getOrNull()?.let { personalOf[source.baseUrl] = it }
             }
             val identity = source.serverId.ifBlank { source.baseUrl }
             val library = raw.map { movies ->
@@ -433,7 +432,9 @@ private suspend fun loadLibraries(servers: List<MediaServer>): LibraryResult = c
             servers = results.map { it.first },
             notes = results.map { it.third }.filter { it.isNotBlank() }.joinToString(" "),
             accounts = groupAccounts(results.map { (source, _, _) -> source to accountOf[source.baseUrl] }),
-            personal = results.flatMap { (source, _, _) -> personalOf[source.baseUrl].orEmpty() }
+            personal = results.mapNotNull { (source, _, _) -> personalOf[source.baseUrl] }.let { all ->
+                PersonalSummary(all.sumOf { it.pictures }, all.sumOf { it.videos }, all.flatMap { it.roots })
+            }
         )
     }
 }
