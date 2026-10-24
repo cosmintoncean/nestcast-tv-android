@@ -31,6 +31,7 @@ import androidx.compose.ui.composed
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.layout.ContentScale
 import coil.compose.AsyncImage
+import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.ui.focus.FocusDirection
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
@@ -215,6 +216,14 @@ class MainActivity : ComponentActivity() {
             var lastPlayedId by remember { mutableStateOf("") }
             var openFolders by remember { mutableStateOf<List<List<String>>>(emptyList()) }
             var accountList by remember { mutableStateOf<List<MediaAccount>>(emptyList()) }
+            // "home" (movies or personal), "library" or "personal"; only PCs with personal folders make a home screen.
+            var section by remember { mutableStateOf("library") }
+            var personalItems by remember { mutableStateOf<List<PersonalItem>>(emptyList()) }
+            val personalTree = remember(personalItems) { buildPersonalTree(personalItems) }
+            var personalPath by remember { mutableStateOf<List<String>>(emptyList()) }
+            var lastOpenedPersonal by remember { mutableStateOf("") }
+            var viewerStartId by remember { mutableStateOf<String?>(null) }
+            val personalGridState = rememberLazyGridState()
             var askWho by remember { mutableStateOf<Movie?>(null) }
 
             fun persistServers(updated: List<MediaServer>) {
@@ -274,6 +283,8 @@ class MainActivity : ComponentActivity() {
                                         } else {
                                             movies = result.movies; tree = result.tree
                                             accounts = result.accounts; accountList = result.accounts
+                                            personalItems = result.personal; personalPath = emptyList()
+                                            section = if (result.personal.isNotEmpty()) "home" else "library"
                                             openFolders = emptyList(); searchQuery = ""
                                             val unavailable = if (result.failed.isNotEmpty()) "Connected to ${servers.size - result.failed.size} of ${servers.size} PCs. Unavailable: ${result.failed.joinToString { it.name }}." else ""
                                             error = listOf(unavailable, result.notes).filter { it.isNotBlank() }.joinToString(" ")
@@ -285,6 +296,28 @@ class MainActivity : ComponentActivity() {
                         },
                         onBackToLibrary = { if (isConnected) manageSources = false }
                     )
+                } else if (viewerStartId != null) {
+                    val folder = remember(personalTree, personalPath, viewerStartId) { personalTree.resolveForViewer(personalTree.effectivePath(personalPath)) }
+                    PhotoViewer(
+                        pictures = folder, startId = viewerStartId!!,
+                        onClose = { viewerStartId = null },
+                        onShown = { lastOpenedPersonal = it.id }
+                    )
+                } else if (section == "home") {
+                    HomeScreen(
+                        movieCount = movies.size,
+                        pictureCount = personalItems.count { it.isImage }, videoCount = personalItems.count { !it.isImage },
+                        onMovies = { section = "library" }, onPersonal = { section = "personal" },
+                        onChangeServer = { manageSources = true }
+                    )
+                } else if (section == "personal") {
+                    PersonalScreen(
+                        items = personalItems, tree = personalTree, openPath = personalPath, onOpenPathChange = { personalPath = it },
+                        lastOpenedId = lastOpenedPersonal, onBackHome = { section = "home" },
+                        onViewImage = { lastOpenedPersonal = it.id; viewerStartId = it.id },
+                        onPlayVideo = { lastOpenedPersonal = it.id; selected = it.asMovie() },
+                        gridState = personalGridState
+                    )
                 } else {
                     LibraryScreen(
                         server = servers.joinToString(" · ") { it.name }, movies = movies, tree = tree,
@@ -294,6 +327,7 @@ class MainActivity : ComponentActivity() {
                         lastPlayedId = lastPlayedId,
                         loading = loading, error = error,
                         onBackToConnect = { manageSources = true },
+                        onHome = if (personalItems.isNotEmpty()) ({ section = "home" }) else null,
                         onRefresh = {
                             loading = true; error = ""
                             lifecycleScope.launch {
@@ -302,6 +336,8 @@ class MainActivity : ComponentActivity() {
                                     if (result.servers != servers) persistServers(result.servers)
                                     movies = result.movies; tree = result.tree
                                     accounts = result.accounts; accountList = result.accounts
+                                    personalItems = result.personal
+                                    if (result.personal.isEmpty() && section != "library") section = "library"
                                     val problem = if (result.failed.isNotEmpty()) "Unavailable sources: ${result.failed.joinToString { it.name }}" else if (movies.isEmpty()) "No videos found. Check the PCs and media folders." else ""
                                     error = listOf(problem, result.notes).filter { it.isNotBlank() }.joinToString(" ")
                                 } catch (e: Exception) { error = "Refresh failed: ${e.message ?: "check network"}" }
@@ -326,6 +362,7 @@ class MainActivity : ComponentActivity() {
 
     /** Sends a finished video to the MediaLog account(s) chosen in "Who's watching?" (see planTargets). */
     private fun reportCompleted(movie: Movie) {
+        if (movie.watchKey.startsWith(PERSONAL_PREFIX)) return // personal videos are nobody's MediaLog business
         val plan = planTargets(accounts, whoChoice?.last(), movie.id.substringBefore('|', ""))
         reporter?.completed(movie, plan)
     }
@@ -347,12 +384,14 @@ private class LibraryResult(
     val failed: List<MediaServer>, val errors: String, val anySuccess: Boolean,
     /** The servers as they should be saved: addresses and IDs may have been updated. */
     val servers: List<MediaServer>, val notes: String,
-    val accounts: List<MediaAccount> = emptyList()
+    val accounts: List<MediaAccount> = emptyList(),
+    val personal: List<PersonalItem> = emptyList()
 )
 
 /** Fetches every server at the same time so one offline PC doesn't delay the others. */
 private suspend fun loadLibraries(servers: List<MediaServer>): LibraryResult = coroutineScope {
     val accountOf = java.util.concurrent.ConcurrentHashMap<String, PcAccount>()
+    val personalOf = java.util.concurrent.ConcurrentHashMap<String, List<PersonalItem>>()
     val results = servers.map { original ->
         async(Dispatchers.IO) {
             val (resolved, note) = resolveServer(original)
@@ -362,6 +401,10 @@ private suspend fun loadLibraries(servers: List<MediaServer>): LibraryResult = c
             val account = if (raw.isSuccess) fetchPcAccount(learned.baseUrl) else null
             if (raw.isSuccess && learned.serverId.isBlank()) fetchServerId(learned.baseUrl)?.let { learned = learned.copy(serverId = it) }
             val source = learned
+            // Personal folders (pictures and videos) are listed separately; PCs without any, or older servers, add nothing.
+            if (raw.isSuccess && fetchPersonalFolderCount(source.baseUrl) > 0) {
+                runCatching { fetchPersonal(source.baseUrl, source.name, servers.size > 1) }.getOrNull()?.let { personalOf[source.baseUrl] = it }
+            }
             val identity = source.serverId.ifBlank { source.baseUrl }
             val library = raw.map { movies ->
                 movies.map { movie ->
@@ -389,7 +432,8 @@ private suspend fun loadLibraries(servers: List<MediaServer>): LibraryResult = c
             anySuccess = good.isNotEmpty(),
             servers = results.map { it.first },
             notes = results.map { it.third }.filter { it.isNotBlank() }.joinToString(" "),
-            accounts = groupAccounts(results.map { (source, _, _) -> source to accountOf[source.baseUrl] })
+            accounts = groupAccounts(results.map { (source, _, _) -> source to accountOf[source.baseUrl] }),
+            personal = results.flatMap { (source, _, _) -> personalOf[source.baseUrl].orEmpty() }
         )
     }
 }
@@ -629,7 +673,7 @@ private fun LibraryScreen(
     openFolders: List<List<String>>, onOpenFoldersChange: (List<List<String>>) -> Unit,
     lastPlayedId: String,
     loading: Boolean, error: String,
-    onBackToConnect: () -> Unit, onRefresh: () -> Unit, onPlay: (Movie) -> Unit
+    onBackToConnect: () -> Unit, onHome: (() -> Unit)?, onRefresh: () -> Unit, onPlay: (Movie) -> Unit
 ) {
     // Each entry is the folder path (from the library root) the user has opened; the last one is on screen.
     // The state lives in the Activity so it survives watching a video (this screen leaves composition).
@@ -648,9 +692,10 @@ private fun LibraryScreen(
     if (searchOpen) SearchDialog(query = query, onQueryChange = onQueryChange, onClose = { searchOpen = false })
     // Back clears an active search first, then climbs out of folders.
     var returnedFrom by remember { mutableStateOf<List<String>?>(null) } // folder just left, to refocus it
-    BackHandler(enabled = searching || stack.size > 1) {
+    BackHandler(enabled = searching || stack.size > 1 || onHome != null) {
         if (searching) onQueryChange("")
-        else { returnedFrom = stack.last(); onOpenFoldersChange(stack.dropLast(1)) }
+        else if (stack.size > 1) { returnedFrom = stack.last(); onOpenFoldersChange(stack.dropLast(1)) }
+        else onHome?.invoke()
     }
     // Rows from the previous folder leave composition, so hand focus to the first row of the new one.
     LaunchedEffect(tree, path, searching, loading) {
