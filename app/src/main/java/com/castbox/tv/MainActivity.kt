@@ -175,6 +175,8 @@ class MainActivity : ComponentActivity() {
     private var playingKey: String = ""
     private var playingMovie: Movie? = null
     private var reporter: WatchReporter? = null
+    private var whoChoice: WhoChoice? = null
+    @Volatile private var accounts: List<MediaAccount> = emptyList()
     @Volatile private var knownServers: List<MediaServer> = emptyList()
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -182,6 +184,8 @@ class MainActivity : ComponentActivity() {
         val prefs = getSharedPreferences("castbox", MODE_PRIVATE)
         val watch = WatchStore(prefs).also { watchStore = it }
         val posters = PosterRepo(prefs)
+        whoChoice = WhoChoice(prefs)
+        val who = whoChoice!!
         val report = WatchReporter(prefs, lifecycleScope) { id -> knownServers.firstOrNull { it.serverId == id }?.baseUrl }.also { reporter = it }
         val savedServers = runCatching {
             val legacy = prefs.getString("server", null)
@@ -210,6 +214,8 @@ class MainActivity : ComponentActivity() {
             var searchQuery by remember { mutableStateOf("") }
             var lastPlayedId by remember { mutableStateOf("") }
             var openFolders by remember { mutableStateOf<List<List<String>>>(emptyList()) }
+            var accountList by remember { mutableStateOf<List<MediaAccount>>(emptyList()) }
+            var askWho by remember { mutableStateOf<Movie?>(null) }
 
             fun persistServers(updated: List<MediaServer>) {
                 servers = updated
@@ -228,7 +234,7 @@ class MainActivity : ComponentActivity() {
                 if (selected != null) {
                     PlaybackScreen(
                         movie = selected!!,
-                        watch = watch, report = report,
+                        watch = watch, onCompleted = { reportCompleted(it) },
                         onBack = { player?.stop(); playingKey = ""; playingMovie = null; selected = null },
                         getPlayer = { movie ->
                             player?.release()
@@ -267,6 +273,7 @@ class MainActivity : ComponentActivity() {
                                             error = listOf(result.errors, result.notes).filter { it.isNotBlank() }.joinToString("\n")
                                         } else {
                                             movies = result.movies; tree = result.tree
+                                            accounts = result.accounts; accountList = result.accounts
                                             openFolders = emptyList(); searchQuery = ""
                                             val unavailable = if (result.failed.isNotEmpty()) "Connected to ${servers.size - result.failed.size} of ${servers.size} PCs. Unavailable: ${result.failed.joinToString { it.name }}." else ""
                                             error = listOf(unavailable, result.notes).filter { it.isNotBlank() }.joinToString(" ")
@@ -281,7 +288,7 @@ class MainActivity : ComponentActivity() {
                 } else {
                     LibraryScreen(
                         server = servers.joinToString(" · ") { it.name }, movies = movies, tree = tree,
-                        watch = watch, posters = posters, report = report,
+                        watch = watch, posters = posters, onCompleted = { reportCompleted(it) },
                         query = searchQuery, onQueryChange = { searchQuery = it },
                         openFolders = openFolders, onOpenFoldersChange = { openFolders = it },
                         lastPlayedId = lastPlayedId,
@@ -294,25 +301,40 @@ class MainActivity : ComponentActivity() {
                                     val result = loadLibraries(servers)
                                     if (result.servers != servers) persistServers(result.servers)
                                     movies = result.movies; tree = result.tree
+                                    accounts = result.accounts; accountList = result.accounts
                                     val problem = if (result.failed.isNotEmpty()) "Unavailable sources: ${result.failed.joinToString { it.name }}" else if (movies.isEmpty()) "No videos found. Check the PCs and media folders." else ""
                                     error = listOf(problem, result.notes).filter { it.isNotBlank() }.joinToString(" ")
                                 } catch (e: Exception) { error = "Refresh failed: ${e.message ?: "check network"}" }
                                 finally { loading = false }
                             }
                         },
-                        onPlay = { lastPlayedId = it.id; selected = it }
+                        // With two or more different MediaLog accounts, ask who to track this for before starting.
+                        onPlay = { lastPlayedId = it.id; if (accountList.size >= 2) askWho = it else selected = it }
                     )
+                    askWho?.let { pending ->
+                        WhoIsWatchingDialog(
+                            accounts = accountList, last = who.last(),
+                            onChoose = { ids -> who.save(ids); askWho = null; selected = pending },
+                            onCancel = { askWho = null }
+                        )
+                    }
                 }
               }
             }
         }
     }
 
+    /** Sends a finished video to the MediaLog account(s) chosen in "Who's watching?" (see planTargets). */
+    private fun reportCompleted(movie: Movie) {
+        val plan = planTargets(accounts, whoChoice?.last(), movie.id.substringBefore('|', ""))
+        reporter?.completed(movie, plan)
+    }
+
     override fun onStop() {
         // Save progress before the player is released (the app can be left mid-video via Home or sleep).
         player?.let { p ->
             val finished = watchStore?.save(playingKey, p.currentPosition, p.duration.takeIf { it != C.TIME_UNSET } ?: 0L) == true
-            if (finished) playingMovie?.let { reporter?.completed(it) }
+            if (finished) playingMovie?.let { reportCompleted(it) }
         }
         player?.release()
         player = null
@@ -324,17 +346,20 @@ private class LibraryResult(
     val movies: List<Movie>, val tree: FolderNode,
     val failed: List<MediaServer>, val errors: String, val anySuccess: Boolean,
     /** The servers as they should be saved: addresses and IDs may have been updated. */
-    val servers: List<MediaServer>, val notes: String
+    val servers: List<MediaServer>, val notes: String,
+    val accounts: List<MediaAccount> = emptyList()
 )
 
 /** Fetches every server at the same time so one offline PC doesn't delay the others. */
 private suspend fun loadLibraries(servers: List<MediaServer>): LibraryResult = coroutineScope {
+    val accountOf = java.util.concurrent.ConcurrentHashMap<String, PcAccount?>()
     val results = servers.map { original ->
         async(Dispatchers.IO) {
             val (resolved, note) = resolveServer(original)
             val raw = runCatching { fetchLibrary(resolved.baseUrl) }
             // Remember the PC's ID the first time we reach it so it can be found again if its address changes.
             var learned = resolved
+            val account = if (raw.isSuccess) fetchPcAccount(learned.baseUrl) else null
             if (raw.isSuccess && learned.serverId.isBlank()) fetchServerId(learned.baseUrl)?.let { learned = learned.copy(serverId = it) }
             val source = learned
             val identity = source.serverId.ifBlank { source.baseUrl }
@@ -348,6 +373,7 @@ private suspend fun loadLibraries(servers: List<MediaServer>): LibraryResult = c
                     )
                 }
             }
+            accountOf[source.baseUrl] = account
             Triple(source, library, note)
         }
     }.awaitAll()
@@ -361,7 +387,8 @@ private suspend fun loadLibraries(servers: List<MediaServer>): LibraryResult = c
             errors = failed.joinToString("\n") { (source, result, _) -> "${source.name}: ${result.exceptionOrNull()?.message ?: "Connection failed"}" },
             anySuccess = good.isNotEmpty(),
             servers = results.map { it.first },
-            notes = results.map { it.third }.filter { it.isNotBlank() }.joinToString(" ")
+            notes = results.map { it.third }.filter { it.isNotBlank() }.joinToString(" "),
+            accounts = groupAccounts(results.map { (source, _, _) -> source to accountOf[source.baseUrl] })
         )
     }
 }
@@ -596,7 +623,7 @@ private fun ConnectScreen(
 
 @Composable
 private fun LibraryScreen(
-    server: String, movies: List<Movie>, tree: FolderNode, watch: WatchStore, posters: PosterRepo, report: WatchReporter,
+    server: String, movies: List<Movie>, tree: FolderNode, watch: WatchStore, posters: PosterRepo, onCompleted: (Movie) -> Unit,
     query: String, onQueryChange: (String) -> Unit,
     openFolders: List<List<String>>, onOpenFoldersChange: (List<List<String>>) -> Unit,
     lastPlayedId: String,
@@ -664,7 +691,7 @@ private fun LibraryScreen(
                     items(filtered, key = { it.id }) { movie ->
                         MovieRow(
                             movie = movie, progress = watch.progress(movie.watchKey), watched = watch.isWatched(movie.watchKey),
-                            onClick = { onPlay(movie) }, onToggleWatched = { toggleWatched(watch, report, listOf(movie)) },
+                            onClick = { onPlay(movie) }, onToggleWatched = { toggleWatched(watch, onCompleted, listOf(movie)) },
                             modifier = if (movie === target) Modifier.focusRequester(firstItem) else Modifier
                         )
                     }
@@ -677,13 +704,13 @@ private fun LibraryScreen(
                             posterUrl = posters.posterFor(entry.segments.last()),
                             modifier = if (isFolderFocusTarget(entry, folders, path, returnedFrom, current, lastPlayedId)) Modifier.focusRequester(firstItem) else Modifier,
                             onClick = { onOpenFoldersChange(stack + listOf(path + entry.segments)) },
-                            onToggleWatched = { toggleWatched(watch, report, inside) }
+                            onToggleWatched = { toggleWatched(watch, onCompleted, inside) }
                         )
                     }
                     items(current.movies, key = { it.id }) { movie ->
                         MovieRow(
                             movie = movie, progress = watch.progress(movie.watchKey), watched = watch.isWatched(movie.watchKey),
-                            onClick = { onPlay(movie) }, onToggleWatched = { toggleWatched(watch, report, listOf(movie)) },
+                            onClick = { onPlay(movie) }, onToggleWatched = { toggleWatched(watch, onCompleted, listOf(movie)) },
                             modifier = if (movie.id == lastPlayedId || (folders.isEmpty() && movie === current.movies.first() && current.movies.none { it.id == lastPlayedId })) Modifier.focusRequester(firstItem) else Modifier
                         )
                     }
@@ -731,10 +758,10 @@ private fun isFolderFocusTarget(
 }
 
 /** Marks every video in [videos] watched, or clears them all if they already are. */
-private fun toggleWatched(watch: WatchStore, report: WatchReporter, videos: List<Movie>) {
+private fun toggleWatched(watch: WatchStore, onCompleted: (Movie) -> Unit, videos: List<Movie>) {
     val allWatched = videos.isNotEmpty() && videos.all { watch.isWatched(it.watchKey) }
     // Only marking as watched is reported; un-marking is never sent.
-    videos.forEach { if (allWatched) watch.markUnwatched(it.watchKey) else if (watch.markWatched(it.watchKey)) report.completed(it) }
+    videos.forEach { if (allWatched) watch.markUnwatched(it.watchKey) else if (watch.markWatched(it.watchKey)) onCompleted(it) }
 }
 
 @Composable
@@ -852,14 +879,14 @@ private const val CONTROLLER_TIMEOUT_MS = 5000
 @androidx.annotation.OptIn(UnstableApi::class)
 @OptIn(UnstableApi::class)
 @Composable
-private fun PlaybackScreen(movie: Movie, watch: WatchStore, report: WatchReporter, onBack: () -> Unit, getPlayer: (Movie) -> ExoPlayer) {
+private fun PlaybackScreen(movie: Movie, watch: WatchStore, onCompleted: (Movie) -> Unit, onBack: () -> Unit, getPlayer: (Movie) -> ExoPlayer) {
     val player = remember(movie.url) { getPlayer(movie) }
     var playerView by remember { mutableStateOf<PlayerView?>(null) }
     var playbackError by remember { mutableStateOf<String?>(null) }
 
     fun saveProgress() {
         val duration = player.duration
-        if (duration != C.TIME_UNSET && watch.save(movie.watchKey, player.currentPosition, duration)) report.completed(movie)
+        if (duration != C.TIME_UNSET && watch.save(movie.watchKey, player.currentPosition, duration)) onCompleted(movie)
     }
 
     // Save on the way out, so backing out by mistake doesn't lose the place.
@@ -878,7 +905,7 @@ private fun PlaybackScreen(movie: Movie, watch: WatchStore, report: WatchReporte
                 if (error == null) playbackError = null
             }
             override fun onPlaybackStateChanged(state: Int) {
-                if (state == Player.STATE_ENDED && watch.markWatched(movie.watchKey)) report.completed(movie)
+                if (state == Player.STATE_ENDED && watch.markWatched(movie.watchKey)) onCompleted(movie)
             }
         }
         player.addListener(listener)

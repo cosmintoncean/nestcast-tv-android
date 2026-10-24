@@ -29,7 +29,7 @@ class WatchReporter(
     /** The PC's current address for a saved server ID (it may have changed since the event); null if unknown. */
     private val currentBase: (serverId: String) -> String?
 ) {
-    private class Event(val eventId: String, val baseUrl: String, val serverId: String, val mediaId: String, val atMs: Long)
+    private class Event(val eventId: String, val baseUrl: String, val serverId: String, val mediaId: String, val atMs: Long, val path: String = "")
 
     private val lock = Mutex()
     private val events = mutableListOf<Event>()
@@ -40,19 +40,27 @@ class WatchReporter(
             val saved = JSONArray(prefs.getString(PREF_KEY, "[]") ?: "[]")
             for (i in 0 until saved.length()) {
                 val o = saved.getJSONObject(i)
-                events += Event(o.getString("e"), o.getString("b"), o.optString("s"), o.getString("m"), o.getLong("t"))
+                events += Event(o.getString("e"), o.getString("b"), o.optString("s"), o.getString("m"), o.getLong("t"), o.optString("p"))
             }
         }
     }
 
-    /** Records that [movie] was finished just now and starts sending. */
-    fun completed(movie: Movie) {
-        val base = movie.id.substringBefore('|', "")
+    /**
+     * Records that [movie] was finished just now and starts sending. [targets] are the PCs whose MediaLog account
+     * should get it: null means the PC the file came from; an empty list means nobody is being tracked.
+     */
+    fun completed(movie: Movie, targets: List<ReportTarget>? = null) {
+        val fileBase = movie.id.substringBefore('|', "")
         val mediaId = movie.watchKey.substringAfter('|', "")
-        if (base.isBlank() || mediaId.isBlank()) return
-        val serverId = movie.watchKey.substringBefore('|', "").takeIf { it != base }.orEmpty()
+        if (fileBase.isBlank() || mediaId.isBlank()) return
+        val fileServerId = movie.watchKey.substringBefore('|', "").takeIf { it != fileBase }.orEmpty()
+        val destinations = targets ?: listOf(ReportTarget(fileBase, fileServerId))
+        if (destinations.isEmpty()) return
+        // Folder and file name let a PC that doesn't have the file work out the title.
+        val path = (movie.folderPath + movie.fileName).joinToString("/").take(600)
         synchronized(events) {
-            events += Event(UUID.randomUUID().toString(), base, serverId, mediaId, System.currentTimeMillis())
+            val now = System.currentTimeMillis()
+            for (target in destinations) events += Event(UUID.randomUUID().toString(), target.baseUrl, target.serverId, mediaId, now, path)
             while (events.size > MAX_EVENTS) events.removeAt(0)
             persist()
         }
@@ -94,7 +102,7 @@ class WatchReporter(
         return try {
             val body = JSONObject()
                 .put("id", event.mediaId).put("event", "completed")
-                .put("at", isoUtc(event.atMs)).put("clientEventId", event.eventId).toString()
+                .put("at", isoUtc(event.atMs)).put("clientEventId", event.eventId).apply { if (event.path.isNotBlank()) put("path", event.path) }.toString()
             val connection = (URL("$base/api/watched").openConnection() as HttpURLConnection).apply {
                 requestMethod = "POST"
                 connectTimeout = 4000
@@ -124,7 +132,7 @@ class WatchReporter(
 
     private fun persist() {
         val out = JSONArray()
-        for (e in events) out.put(JSONObject().put("e", e.eventId).put("b", e.baseUrl).put("s", e.serverId).put("m", e.mediaId).put("t", e.atMs))
+        for (e in events) out.put(JSONObject().put("e", e.eventId).put("b", e.baseUrl).put("s", e.serverId).put("m", e.mediaId).put("t", e.atMs).put("p", e.path))
         prefs.edit().putString(PREF_KEY, out.toString()).apply()
     }
 
