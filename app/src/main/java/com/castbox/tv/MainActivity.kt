@@ -31,6 +31,7 @@ import androidx.compose.ui.composed
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.layout.ContentScale
 import coil.compose.AsyncImage
+import androidx.lifecycle.repeatOnLifecycle
 import androidx.compose.ui.focus.FocusDirection
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
@@ -184,6 +185,7 @@ class MainActivity : ComponentActivity() {
         val prefs = getSharedPreferences("castbox", MODE_PRIVATE)
         val watch = WatchStore(prefs).also { watchStore = it }
         val posters = PosterRepo(prefs)
+        val me = TvIdentity(prefs, this)
         whoChoice = WhoChoice(prefs)
         val who = whoChoice!!
         val report = WatchReporter(prefs, lifecycleScope) { id -> knownServers.firstOrNull { it.serverId == id }?.baseUrl }.also { reporter = it }
@@ -215,6 +217,8 @@ class MainActivity : ComponentActivity() {
             var lastPlayedId by remember { mutableStateOf("") }
             var openFolders by remember { mutableStateOf<List<List<String>>>(emptyList()) }
             var accountList by remember { mutableStateOf<List<MediaAccount>>(emptyList()) }
+            // Casting a PC's screen to this TV: picking a screen, waiting for the PC's yes, watching.
+            var cast by remember { mutableStateOf<CastState?>(null) }
             // "home" (movies or personal), "library" or "personal"; only PCs with personal folders make a home screen.
             var section by remember { mutableStateOf("library") }
             var personalSummary by remember { mutableStateOf(PersonalSummary(0, 0, emptyList())) }
@@ -239,7 +243,10 @@ class MainActivity : ComponentActivity() {
             )) {
               // Text without an explicit colour would otherwise default to black on the dark background.
               Surface(modifier = Modifier.fillMaxSize(), color = Bg, contentColor = Color.White) {
-                if (selected != null) {
+                if (cast is CastState.Watching) {
+                    val watching = cast as CastState.Watching
+                    CastPlayerScreen(url = watching.url, title = watching.title, onClose = { cast = null })
+                } else if (selected != null) {
                     PlaybackScreen(
                         movie = selected!!,
                         watch = watch, onCompleted = { reportCompleted(it) },
@@ -294,7 +301,8 @@ class MainActivity : ComponentActivity() {
                                 }
                             }
                         },
-                        onBackToLibrary = { if (isConnected) manageSources = false }
+                        onBackToLibrary = { if (isConnected) manageSources = false },
+                        onCast = { cast = CastState.Picking(it) }
                     )
                 } else if (viewerFolder != null) {
                     PhotoViewer(
@@ -354,7 +362,23 @@ class MainActivity : ComponentActivity() {
                         )
                     }
                 }
+                CastDialogs(cast, me) { cast = it }
               }
+            }
+            // A PC can send one of its screens to this TV ("Share screen" in the server window): ask every PC now and then
+            // while the app is on screen and nothing is playing.
+            LaunchedEffect(servers, cast == null, selected == null) {
+                if (cast != null || selected != null || servers.isEmpty()) return@LaunchedEffect
+                lifecycle.repeatOnLifecycle(androidx.lifecycle.Lifecycle.State.STARTED) {
+                    while (true) {
+                        var offered = false
+                        for (server in servers) {
+                            val offer = withContext(Dispatchers.IO) { fetchCastOffer(server, me, if (servers.size == 1) 20 else 4) }
+                            if (offer != null) { cast = CastState.Watching(offer.streamUrl, "${offer.screenName} of ${offer.pcName}"); offered = true; break }
+                        }
+                        if (!offered) delay(500)
+                    }
+                }
             }
         }
     }
@@ -526,7 +550,7 @@ private fun fetchLibrary(base: String): List<Movie> {
 private fun ServerSourcesScreen(
     servers: List<MediaServer>, loading: Boolean, error: String,
     onAdd: (String, String) -> Unit, onRemove: (MediaServer) -> Unit,
-    onConnect: () -> Unit, onBackToLibrary: () -> Unit
+    onConnect: () -> Unit, onBackToLibrary: () -> Unit, onCast: (MediaServer) -> Unit
 ) {
     var showAddDialog by remember { mutableStateOf(false) }
     val primaryAction = remember { FocusRequester() }
@@ -577,6 +601,8 @@ private fun ServerSourcesScreen(
                         Text(server.name, fontWeight = FontWeight.SemiBold, fontSize = 17.sp)
                         Text(server.baseUrl, color = Muted, fontSize = 13.sp)
                     }
+                    OutlinedButton(onClick = { onCast(server) }) { Text("Cast screen") }
+                    Spacer(Modifier.width(8.dp))
                     TextButton(onClick = { onRemove(server) }) { Text("Remove", color = Color(0xFFFFB4A8)) }
                 }
             }
