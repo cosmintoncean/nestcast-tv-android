@@ -18,6 +18,8 @@ android {
         versionName = "0.9.1"
         // TV devices are ARM; skipping x86 keeps the FFmpeg native libraries from bloating the APK.
         ndk { abiFilters += listOf("armeabi-v7a", "arm64-v8a") }
+        // The Support (donation) screen. Google Play restricts donation links inside apps, so the play build hides it.
+        buildConfigField("boolean", "SHOW_SUPPORT", "true")
     }
 
     // The key Google Play accepts uploads with (with Play App Signing, Google holds the real signing key). The key and its
@@ -53,10 +55,11 @@ android {
             initWith(getByName("release"))
             signingConfig = signingConfigs.findByName("upload")
             matchingFallbacks += "release"
+            buildConfigField("boolean", "SHOW_SUPPORT", "false")
         }
     }
 
-    buildFeatures { compose = true }
+    buildFeatures { compose = true; buildConfig = true }
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17

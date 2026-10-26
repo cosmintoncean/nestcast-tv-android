@@ -92,3 +92,9 @@ Notes:
 - Duplicate detection is currently by exact media URL. The same movie stored on two PCs may appear twice.
 - `.\gradlew.bat assembleDebug` built successfully on 2026-10-23 (JDK from Android Studio, SDK Platform 35). It has not been tested on a Chromecast/Android TV device.
 - `pc-server/` is an older standalone ASP.NET test server that predates the Windows app in `castbox-media-server`; the Windows app is the supported server.
+
+## Licence
+
+NestCast TV is free software under the [GNU General Public License v3.0](LICENSE). It includes the Jellyfin FFmpeg audio decoder for Media3 (GPL-3.0), which is why the whole app is GPL-3.0 and its source must stay available. Other libraries (AndroidX, Media3, Coil, ZXing) are Apache-2.0.
+
+The Support (donation) screen is shown in sideloaded builds only; the build used for Google Play hides it.

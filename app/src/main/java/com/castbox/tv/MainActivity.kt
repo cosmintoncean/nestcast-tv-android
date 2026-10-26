@@ -604,7 +604,7 @@ private fun ServerSourcesScreen(
                     if (onBackToLibrary != null) OutlinedButton(onClick = onBackToLibrary, modifier = Modifier.weight(1f).height(48.dp)) { Text("Cancel") }
                 }
             }
-            OutlinedButton(onClick = { showSupport = true }, modifier = Modifier.fillMaxWidth().height(54.dp)) {
+            if (BuildConfig.SHOW_SUPPORT) OutlinedButton(onClick = { showSupport = true }, modifier = Modifier.fillMaxWidth().height(54.dp)) {
                 Icon(Icons.Outlined.Coffee, contentDescription = null, modifier = Modifier.size(20.dp))
                 Spacer(Modifier.width(8.dp))
                 Text("Support NestCast", fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
