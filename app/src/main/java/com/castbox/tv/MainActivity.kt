@@ -555,7 +555,9 @@ private fun ServerSourcesScreen(
     onConnect: () -> Unit, onBackToLibrary: () -> Unit, onCast: (MediaServer) -> Unit
 ) {
     var showAddDialog by remember { mutableStateOf(false) }
+    var showSupport by remember { mutableStateOf(false) }
     val primaryAction = remember { FocusRequester() }
+    if (showSupport) SupportDialog(onClose = { showSupport = false })
     // Start on the main button; the text fields live in a dialog so they never grab focus or the keyboard.
     LaunchedEffect(Unit) { runCatching { primaryAction.requestFocus() } }
     if (showAddDialog) {
@@ -592,6 +594,7 @@ private fun ServerSourcesScreen(
         Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
             OutlinedButton(onClick = { showAddDialog = true }) { Text("Add PC") }
             if (servers.isNotEmpty()) OutlinedButton(onClick = onBackToLibrary) { Text("Cancel") }
+            OutlinedButton(onClick = { showSupport = true }) { Text("Support CastBox") }
         }
         if (error.isNotBlank() && !showAddDialog) Text(error, color = Color(0xFFFFB4A8), fontSize = 14.sp)
         Text("Configured PCs (${servers.size})", fontSize = 20.sp, fontWeight = FontWeight.SemiBold, color = Color.White)

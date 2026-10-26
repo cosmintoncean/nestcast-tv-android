@@ -14,8 +14,8 @@ android {
         applicationId = "com.castbox.tv"
         minSdk = 23
         targetSdk = 36
-        versionCode = 9
-        versionName = "0.9.0"
+        versionCode = 10
+        versionName = "0.9.1"
         // TV devices are ARM; skipping x86 keeps the FFmpeg native libraries from bloating the APK.
         ndk { abiFilters += listOf("armeabi-v7a", "arm64-v8a") }
     }
@@ -79,6 +79,7 @@ dependencies {
     implementation("androidx.media3:media3-ui:1.5.1")
     // Loads and caches show poster images.
     implementation("io.coil-kt:coil-compose:2.7.0")
+    implementation("com.google.zxing:core:3.5.3")
     // Software decoder for audio the TV can't play itself (E-AC-3/Dolby Digital Plus, AC-3, DTS, TrueHD...).
     // Jellyfin's prebuilt FFmpeg extension; GPL-3.0, so the app's source must be published under the GPL before it is
     // distributed (Play included), or this must be replaced with an LGPL build. See docs/play-store.md.
