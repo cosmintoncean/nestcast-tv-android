@@ -42,4 +42,4 @@ If this policy changes, the new version will be published here with a new date.
 
 ## Contact
 
-Questions about this policy: [contact email to be added]
+Questions about this policy: cosmintoncean@gmail.com
