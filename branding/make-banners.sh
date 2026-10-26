@@ -3,7 +3,7 @@
 # Run it again after changing the name or tagline below. Needs ffmpeg on the PATH and the Segoe UI fonts (Windows).
 set -euo pipefail
 cd "$(dirname "$0")/.."
-NAME="CastBox"; TAGLINE="Your PC on your TV"
+NAME="NestCast"; TAGLINE="Your PC on your TV"
 BOLD="C\:/Windows/Fonts/segoeuib.ttf"; REG="C\:/Windows/Fonts/segoeui.ttf"
 # The icon's own background colour, so the banner and the icon blend.
 BG=$(ffmpeg -loglevel error -i branding/castbox-icon-original.png -vf "crop=1:1:6:6" -f rawvideo -pix_fmt rgb24 - | od -An -tx1 | tr -d ' \n')

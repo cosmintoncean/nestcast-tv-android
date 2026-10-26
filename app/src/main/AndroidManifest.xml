@@ -5,7 +5,7 @@
     <application
         android:allowBackup="false"
         android:dataExtractionRules="@xml/data_extraction_rules"
-        android:label="CastBox"
+        android:label="NestCast"
         android:icon="@mipmap/castbox_icon"
         android:banner="@drawable/banner"
         android:roundIcon="@mipmap/castbox_icon"

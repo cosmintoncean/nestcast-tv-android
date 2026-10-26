@@ -23,7 +23,7 @@ import com.google.zxing.EncodeHintType
 import com.google.zxing.qrcode.QRCodeWriter
 import com.google.zxing.qrcode.decoder.ErrorCorrectionLevel
 
-/** Where people can support CastBox. Showing it sends nothing anywhere: the link is only text and a QR code. */
+/** Where people can support NestCast. Showing it sends nothing anywhere: the link is only text and a QR code. */
 const val DONATE_URL = "https://ko-fi.com/comaapps"
 
 /** Black-on-white QR code for [text], with a quiet zone so phone cameras read it from a TV. */
@@ -34,16 +34,16 @@ fun qrBitmap(text: String, size: Int = 512): Bitmap {
     return Bitmap.createBitmap(pixels, size, size, Bitmap.Config.ARGB_8888)
 }
 
-/** "Support CastBox": the Ko-fi link as text plus a QR code to scan with a phone (a TV has no usable browser). */
+/** "Support NestCast": the Ko-fi link as text plus a QR code to scan with a phone (a TV has no usable browser). */
 @Composable
 fun SupportDialog(onClose: () -> Unit) {
     val qr = remember { qrBitmap(DONATE_URL).asImageBitmap() }
     AlertDialog(
         onDismissRequest = onClose,
-        title = { Text("Support CastBox") },
+        title = { Text("Support NestCast") },
         text = {
             Column(Modifier.widthIn(max = 420.dp), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                Text("CastBox is free and has no ads. If you enjoy it, scan this code with your phone to leave a tip.", fontSize = 15.sp)
+                Text("NestCast is free and has no ads. If you enjoy it, scan this code with your phone to leave a tip.", fontSize = 15.sp)
                 Image(qr, contentDescription = "QR code for $DONATE_URL", filterQuality = FilterQuality.None, modifier = Modifier.size(220.dp))
                 Text(DONATE_URL, fontSize = 16.sp)
             }

@@ -1,6 +1,6 @@
-# CastBox TV — Android TV MVP
+# NestCast TV — Android TV MVP
 
-This replaces the browser-to-Chromecast sender approach with a native Android TV app. The TV app browses the CastBox server's library and plays selected files directly from the Windows PC using AndroidX Media3/ExoPlayer. No phone, Chrome, or PC desktop interaction is needed during playback.
+This replaces the browser-to-Chromecast sender approach with a native Android TV app. The TV app browses the NestCast server's library and plays selected files directly from the Windows PC using AndroidX Media3/ExoPlayer. No phone, Chrome, or PC desktop interaction is needed during playback.
 
 ## Current MVP features
 
@@ -8,7 +8,7 @@ This replaces the browser-to-Chromecast sender approach with a native Android TV
 - Configure the media server's LAN URL in the app
 - Load `/api/library`, search and list movies
 - Play selected HTTP media URLs using Media3/ExoPlayer
-- Works with the existing CastBox .NET server API
+- Works with the existing NestCast .NET server API
 
 This is a source project, not a prebuilt/verified APK. It needs to be built in Android Studio. I could not run an Android Gradle build in this environment.
 
@@ -55,7 +55,7 @@ Some TV builds use a pairing step/port shown in Developer options. Alternatively
 
 ## 4. First run
 
-1. Open **CastBox TV** on the TV.
+1. Open **NestCast TV** on the TV.
 2. In Server settings, enter the PC's LAN address, e.g. `http://192.168.1.50:5078`.
 3. Choose **Save and connect**.
 4. Select a movie with the remote.
@@ -73,15 +73,15 @@ The server address is saved on the TV. Press Refresh after adding/removing files
 
 
 ## Branding
-The CastBox launcher icon is configured in `app/src/main/res/mipmap-nodpi/castbox_icon.png`. The original generated artwork is in `branding/castbox-icon-original.png`.
+The NestCast launcher icon is configured in `app/src/main/res/mipmap-nodpi/castbox_icon.png`. The original generated artwork is in `branding/castbox-icon-original.png`.
 
 
 ## Multi-PC library (Android TV 0.3.0)
 
 The TV app now supports multiple Windows media servers:
-1. Open CastBox on the TV and use **Your media PCs**.
+1. Open NestCast on the TV and use **Your media PCs**.
 2. Add a friendly name and the full server URL for each PC, e.g. `http://192.168.1.25:5078`.
-3. Select **Connect to library**. CastBox queries each server, combines successful results, and plays each movie from its source server.
+3. Select **Connect to library**. NestCast queries each server, combines successful results, and plays each movie from its source server.
 4. Use **Refresh** to reload all configured servers, or **Change sources** to add/remove PCs.
 
 Server URLs are saved locally on the TV. The old single-server preference is migrated into a first source automatically.

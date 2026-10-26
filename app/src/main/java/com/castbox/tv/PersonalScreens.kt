@@ -235,7 +235,7 @@ fun HomeScreen(movieCount: Int, pictureCount: Int, videoCount: Int, onMovies: ()
     // The cards must be laid out before they can take focus, so ask a moment after the screen appears.
     LaunchedEffect(Unit) { delay(150); runCatching { first.requestFocus() } }
     Column(Modifier.fillMaxSize().background(PBg).padding(horizontal = 56.dp, vertical = 36.dp)) {
-        Text("CASTBOX", color = PAccent, fontSize = 15.sp, fontWeight = FontWeight.Bold, letterSpacing = 5.sp)
+        Text("NESTCAST", color = PAccent, fontSize = 15.sp, fontWeight = FontWeight.Bold, letterSpacing = 5.sp)
         Spacer(Modifier.height(6.dp))
         Text("What would you like to watch?", fontSize = 34.sp, lineHeight = 42.sp, fontWeight = FontWeight.Bold, color = Color.White)
         Spacer(Modifier.height(36.dp))
@@ -335,7 +335,7 @@ fun PersonalScreen(
     }
 
     Column(Modifier.fillMaxSize().background(PBg).padding(horizontal = 42.dp, vertical = 24.dp)) {
-        Text("CASTBOX", color = PAccent, fontSize = 14.sp, fontWeight = FontWeight.Bold, letterSpacing = 4.sp)
+        Text("NESTCAST", color = PAccent, fontSize = 14.sp, fontWeight = FontWeight.Bold, letterSpacing = 4.sp)
         val title = when {
             location == null -> "Personal"
             location.segments.isEmpty() -> if (onlyRoot) "Personal" else location.root.name

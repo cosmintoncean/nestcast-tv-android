@@ -498,7 +498,7 @@ private fun localSubnetPrefix(): String? = runCatching {
         ?.hostAddress?.substringBeforeLast('.')?.plus(".")
 }.getOrNull()
 
-/** Probes every address on the local /24 for a CastBox server with [serverId]; returns its base URL. */
+/** Probes every address on the local /24 for a NestCast server with [serverId]; returns its base URL. */
 private fun findServerOnLan(serverId: String, port: Int): String? {
     val prefix = localSubnetPrefix() ?: return null
     val pool = java.util.concurrent.Executors.newFixedThreadPool(48)
@@ -574,9 +574,9 @@ private fun ServerSourcesScreen(
         Modifier.fillMaxSize().background(Bg).verticalScroll(rememberScrollState()).padding(horizontal = 48.dp, vertical = 28.dp),
         verticalArrangement = Arrangement.spacedBy(16.dp)
     ) {
-        Text("CASTBOX", color = Accent, fontSize = 15.sp, fontWeight = FontWeight.Bold, letterSpacing = 5.sp)
+        Text("NESTCAST", color = Accent, fontSize = 15.sp, fontWeight = FontWeight.Bold, letterSpacing = 5.sp)
         Text("Your media PCs", fontSize = 32.sp, fontWeight = FontWeight.Bold, color = Color.White)
-        Text("Add each Windows PC once. CastBox combines their libraries and streams each movie from its source PC.", color = Muted, fontSize = 16.sp)
+        Text("Add each Windows PC once. NestCast combines their libraries and streams each movie from its source PC.", color = Muted, fontSize = 16.sp)
         Button(
             onClick = onConnect,
             enabled = !loading && servers.isNotEmpty(),
@@ -594,7 +594,7 @@ private fun ServerSourcesScreen(
         Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
             OutlinedButton(onClick = { showAddDialog = true }) { Text("Add PC") }
             if (servers.isNotEmpty()) OutlinedButton(onClick = onBackToLibrary) { Text("Cancel") }
-            OutlinedButton(onClick = { showSupport = true }) { Text("Support CastBox") }
+            OutlinedButton(onClick = { showSupport = true }) { Text("Support NestCast") }
         }
         if (error.isNotBlank() && !showAddDialog) Text(error, color = Color(0xFFFFB4A8), fontSize = 14.sp)
         Text("Configured PCs (${servers.size})", fontSize = 20.sp, fontWeight = FontWeight.SemiBold, color = Color.White)
@@ -665,7 +665,7 @@ private fun ConnectScreen(
         Modifier.fillMaxSize().background(Bg).verticalScroll(rememberScrollState()).padding(horizontal = 48.dp, vertical = 30.dp),
         verticalArrangement = Arrangement.Center
     ) {
-        Text("CASTBOX", color = Accent, fontSize = 15.sp, fontWeight = FontWeight.Bold, letterSpacing = 5.sp)
+        Text("NESTCAST", color = Accent, fontSize = 15.sp, fontWeight = FontWeight.Bold, letterSpacing = 5.sp)
         Spacer(Modifier.height(10.dp))
         Text("Connect to your media PC", fontSize = 32.sp, fontWeight = FontWeight.Bold, color = Color.White)
         Spacer(Modifier.height(8.dp))
@@ -739,7 +739,7 @@ private fun LibraryScreen(
     Column(Modifier.fillMaxSize().background(Bg).padding(horizontal = 42.dp, vertical = 24.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Column(Modifier.weight(1f)) {
-                Text("CASTBOX", color = Accent, fontSize = 14.sp, fontWeight = FontWeight.Bold, letterSpacing = 4.sp)
+                Text("NESTCAST", color = Accent, fontSize = 14.sp, fontWeight = FontWeight.Bold, letterSpacing = 4.sp)
                 Text("Your movie library", fontSize = 32.sp, fontWeight = FontWeight.Bold, color = Color.White)
                 val where = if (searching) "Search results" else if (path.isEmpty()) server else path.joinToString("  ›  ") { posters.displayName(it) }
                 val watchedTotal = movies.count { watch.isWatched(it.watchKey) }

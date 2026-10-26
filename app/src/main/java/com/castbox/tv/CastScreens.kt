@@ -157,7 +157,7 @@ private fun PickScreenDialog(server: MediaServer, me: TvIdentity, onState: (Cast
     LaunchedEffect(server) {
         try { screens = withContext(Dispatchers.IO) { fetchCastScreens(server, me) } }
         catch (e: Exception) {
-            problem = if (e.message == "old") "This PC's CastBox is too old to share its screen. Update CastBox on ${server.name}." else "Couldn't reach ${server.name}."
+            problem = if (e.message == "old") "This PC's NestCast is too old to share its screen. Update NestCast on ${server.name}." else "Couldn't reach ${server.name}."
         }
     }
     val loaded = screens
@@ -170,7 +170,7 @@ private fun PickScreenDialog(server: MediaServer, me: TvIdentity, onState: (Cast
                 when {
                     problem != null -> Text(problem!!, color = Color(0xFFFFB4A8))
                     loaded == null -> CircularProgressIndicator(Modifier.size(28.dp), strokeWidth = 3.dp)
-                    !loaded.available -> Text("This PC can't share its screen yet (FFmpeg is missing from its CastBox).", color = Color(0xFFFFB4A8))
+                    !loaded.available -> Text("This PC can't share its screen yet (FFmpeg is missing from its NestCast).", color = Color(0xFFFFB4A8))
                     loaded.screens.isEmpty() -> Text("This PC reports no screens.")
                     else -> {
                         Text("The PC may ask you to allow it.", fontSize = 13.sp, color = Color(0xFF9CA3AF))
@@ -218,7 +218,7 @@ private fun WaitingDialog(state: CastState.Waiting, me: TvIdentity, onState: (Ca
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 CircularProgressIndicator(Modifier.size(28.dp), strokeWidth = 3.dp)
-                Text("Allow “${me.name}” to watch ${state.screen.name} in the CastBox window on the PC.")
+                Text("Allow “${me.name}” to watch ${state.screen.name} in the NestCast window on the PC.")
             }
         },
         confirmButton = {},
