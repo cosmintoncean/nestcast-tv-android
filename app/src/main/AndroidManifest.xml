@@ -4,8 +4,10 @@
     <uses-permission android:name="android.permission.INTERNET" />
     <application
         android:allowBackup="false"
+        android:dataExtractionRules="@xml/data_extraction_rules"
         android:label="CastBox"
         android:icon="@mipmap/castbox_icon"
+        android:banner="@drawable/banner"
         android:roundIcon="@mipmap/castbox_icon"
         android:usesCleartextTraffic="true"
         android:theme="@style/AppTheme">

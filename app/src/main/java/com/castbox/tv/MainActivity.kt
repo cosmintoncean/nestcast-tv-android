@@ -180,6 +180,7 @@ class MainActivity : ComponentActivity() {
     @Volatile private var accounts: List<MediaAccount> = emptyList()
     @Volatile private var knownServers: List<MediaServer> = emptyList()
 
+    @androidx.annotation.OptIn(UnstableApi::class)
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         val prefs = getSharedPreferences("castbox", MODE_PRIVATE)
@@ -242,7 +243,8 @@ class MainActivity : ComponentActivity() {
                 onBackground = Color.White, onSurface = Color.White
             )) {
               // Text without an explicit colour would otherwise default to black on the dark background.
-              Surface(modifier = Modifier.fillMaxSize(), color = Bg, contentColor = Color.White) {
+              // From API 35 apps draw edge to edge; keep the content clear of any system bars (a TV has none).
+              Surface(modifier = Modifier.fillMaxSize().safeDrawingPadding(), color = Bg, contentColor = Color.White) {
                 if (cast is CastState.Watching) {
                     val watching = cast as CastState.Watching
                     CastPlayerScreen(url = watching.url, title = watching.title, onClose = { cast = null })
