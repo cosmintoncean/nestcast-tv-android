@@ -23,6 +23,8 @@ import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.outlined.Coffee
+import androidx.compose.material.icons.outlined.ConnectedTv
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -303,7 +305,7 @@ class MainActivity : ComponentActivity() {
                                 }
                             }
                         },
-                        onBackToLibrary = { if (isConnected) manageSources = false },
+                        onBackToLibrary = if (isConnected) ({ manageSources = false }) else null,
                         onCast = { cast = CastState.Picking(it) }
                     )
                 } else if (viewerFolder != null) {
@@ -552,7 +554,7 @@ private fun fetchLibrary(base: String): List<Movie> {
 private fun ServerSourcesScreen(
     servers: List<MediaServer>, loading: Boolean, error: String,
     onAdd: (String, String) -> Unit, onRemove: (MediaServer) -> Unit,
-    onConnect: () -> Unit, onBackToLibrary: () -> Unit, onCast: (MediaServer) -> Unit
+    onConnect: () -> Unit, onBackToLibrary: (() -> Unit)?, onCast: (MediaServer) -> Unit
 ) {
     var showAddDialog by remember { mutableStateOf(false) }
     var showSupport by remember { mutableStateOf(false) }
@@ -570,45 +572,58 @@ private fun ServerSourcesScreen(
             }
         )
     }
-    Column(
-        Modifier.fillMaxSize().background(Bg).verticalScroll(rememberScrollState()).padding(horizontal = 48.dp, vertical = 28.dp),
-        verticalArrangement = Arrangement.spacedBy(16.dp)
-    ) {
-        Text("NESTCAST", color = Accent, fontSize = 15.sp, fontWeight = FontWeight.Bold, letterSpacing = 5.sp)
-        Text("Your media PCs", fontSize = 32.sp, fontWeight = FontWeight.Bold, color = Color.White)
-        Text("Add each Windows PC once. NestCast combines their libraries and streams each movie from its source PC.", color = Muted, fontSize = 16.sp)
-        Button(
-            onClick = onConnect,
-            enabled = !loading && servers.isNotEmpty(),
-            modifier = Modifier.height(54.dp).focusRequester(primaryAction)
+    Box(Modifier.fillMaxSize().background(Bg).verticalScroll(rememberScrollState()), contentAlignment = Alignment.TopCenter) {
+        Column(
+            Modifier.fillMaxWidth().widthIn(max = 880.dp).padding(horizontal = 48.dp, vertical = 28.dp),
+            verticalArrangement = Arrangement.spacedBy(16.dp)
         ) {
-            if (loading) {
-                CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp, color = Color.Black)
-                Spacer(Modifier.width(8.dp))
-            }
-            Text(if (loading) "Connecting to unified library…" else "Open unified library", fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
-        }
-        if (servers.isEmpty()) {
-            Text("Add a PC to get started. Once at least one PC is configured, the button above opens the unified library.", color = Muted, fontSize = 14.sp)
-        }
-        Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-            OutlinedButton(onClick = { showAddDialog = true }) { Text("Add PC") }
-            if (servers.isNotEmpty()) OutlinedButton(onClick = onBackToLibrary) { Text("Cancel") }
-            OutlinedButton(onClick = { showSupport = true }) { Text("Support NestCast") }
-        }
-        if (error.isNotBlank() && !showAddDialog) Text(error, color = Color(0xFFFFB4A8), fontSize = 14.sp)
-        Text("Configured PCs (${servers.size})", fontSize = 20.sp, fontWeight = FontWeight.SemiBold, color = Color.White)
-        if (servers.isEmpty()) Text("No PCs added yet.", color = Muted)
-        servers.forEach { server ->
-            Surface(color = Panel, shape = RoundedCornerShape(12.dp), modifier = Modifier.fillMaxWidth().widthIn(max = 850.dp)) {
-                Row(Modifier.padding(horizontal = 16.dp, vertical = 12.dp), verticalAlignment = Alignment.CenterVertically) {
-                    Column(Modifier.weight(1f)) {
-                        Text(server.name, fontWeight = FontWeight.SemiBold, fontSize = 17.sp)
-                        Text(server.baseUrl, color = Muted, fontSize = 13.sp)
+            Text("NESTCAST", color = Accent, fontSize = 15.sp, fontWeight = FontWeight.Bold, letterSpacing = 5.sp)
+            Text("Your media, on the big screen", fontSize = 32.sp, fontWeight = FontWeight.Bold, color = Color.White)
+            Text("Watch movies and shows, browse your personal photos and videos, or cast your PC screen to your TV.", color = Muted, fontSize = 16.sp)
+            if (servers.isEmpty()) {
+                Row(horizontalArrangement = Arrangement.spacedBy(14.dp), verticalAlignment = Alignment.Top) {
+                    Icon(Icons.Outlined.ConnectedTv, contentDescription = null, tint = Color.White, modifier = Modifier.padding(top = 2.dp).size(26.dp))
+                    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                        Text("Connect your media PCs", fontWeight = FontWeight.SemiBold, fontSize = 18.sp, color = Color.White)
+                        Text("Add a Windows PC to access its media. Connect multiple PCs to bring their libraries together.", color = Muted, fontSize = 14.sp)
                     }
-                    OutlinedButton(onClick = { onCast(server) }) { Text("Cast screen") }
-                    Spacer(Modifier.width(8.dp))
-                    TextButton(onClick = { onRemove(server) }) { Text("Remove", color = Color(0xFFFFB4A8)) }
+                }
+                Button(onClick = { showAddDialog = true }, modifier = Modifier.fillMaxWidth().height(54.dp).focusRequester(primaryAction)) {
+                    Text("+ Add a PC", fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+                }
+            } else {
+                Button(onClick = onConnect, enabled = !loading, modifier = Modifier.fillMaxWidth().height(54.dp).focusRequester(primaryAction)) {
+                    if (loading) {
+                        CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp, color = Color.Black)
+                        Spacer(Modifier.width(8.dp))
+                    }
+                    Text(if (loading) "Connecting to unified library…" else "Open unified library", fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+                }
+                Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    OutlinedButton(onClick = { showAddDialog = true }, modifier = Modifier.weight(1f).height(48.dp)) { Text("+ Add a PC") }
+                    if (onBackToLibrary != null) OutlinedButton(onClick = onBackToLibrary, modifier = Modifier.weight(1f).height(48.dp)) { Text("Cancel") }
+                }
+            }
+            OutlinedButton(onClick = { showSupport = true }, modifier = Modifier.fillMaxWidth().height(54.dp)) {
+                Icon(Icons.Outlined.Coffee, contentDescription = null, modifier = Modifier.size(20.dp))
+                Spacer(Modifier.width(8.dp))
+                Text("Support NestCast", fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+            }
+            if (error.isNotBlank() && !showAddDialog) Text(error, color = Color(0xFFFFB4A8), fontSize = 14.sp)
+            HorizontalDivider(color = Color(0xFF2A2D34))
+            Text("Connected PCs (${servers.size})", fontSize = 20.sp, fontWeight = FontWeight.SemiBold, color = Color.White)
+            if (servers.isEmpty()) Text("No PCs connected yet. Add a Windows PC to get started.", color = Muted)
+            servers.forEach { server ->
+                Surface(color = Panel, shape = RoundedCornerShape(12.dp), modifier = Modifier.fillMaxWidth()) {
+                    Row(Modifier.padding(horizontal = 16.dp, vertical = 12.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Column(Modifier.weight(1f)) {
+                            Text(server.name, fontWeight = FontWeight.SemiBold, fontSize = 17.sp)
+                            Text(server.baseUrl, color = Muted, fontSize = 13.sp)
+                        }
+                        OutlinedButton(onClick = { onCast(server) }) { Text("Cast screen") }
+                        Spacer(Modifier.width(8.dp))
+                        TextButton(onClick = { onRemove(server) }) { Text("Remove", color = Color(0xFFFFB4A8)) }
+                    }
                 }
             }
         }
@@ -619,18 +634,23 @@ private fun ServerSourcesScreen(
 @Composable
 private fun AddServerDialog(error: String, onDismiss: () -> Unit, onAdd: (String, String) -> Unit) {
     var name by remember { mutableStateOf("") }
-    var address by remember { mutableStateOf("") }
+    // Pre-filled with this TV's own network and the default port, with the last two digits of the PC's address selected,
+    // so typing replaces just those.
+    var address by remember {
+        val head = "http://${localSubnetPrefix() ?: "192.168.1."}"
+        mutableStateOf(androidx.compose.ui.text.input.TextFieldValue("${head}25:5078", androidx.compose.ui.text.TextRange(head.length, head.length + 2)))
+    }
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text("Add a media PC") },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 OutlinedTextField(value = name, onValueChange = { name = it }, singleLine = true, label = { Text("PC name (e.g. Living Room PC)") }, modifier = Modifier.fillMaxWidth())
-                OutlinedTextField(value = address, onValueChange = { address = it }, singleLine = true, label = { Text("Server URL") }, placeholder = { Text("http://192.168.1.25:5078") }, modifier = Modifier.fillMaxWidth())
+                OutlinedTextField(value = address, onValueChange = { address = it }, singleLine = true, label = { Text("Server URL") }, modifier = Modifier.fillMaxWidth())
                 if (error.isNotBlank()) Text(error, color = Color(0xFFFFB4A8), fontSize = 14.sp)
             }
         },
-        confirmButton = { TextButton(onClick = { onAdd(name, address) }) { Text("Add") } },
+        confirmButton = { TextButton(onClick = { onAdd(name, address.text) }) { Text("Add") } },
         dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } }
     )
 }
