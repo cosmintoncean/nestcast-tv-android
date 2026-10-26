@@ -11,7 +11,7 @@ android {
     compileSdk = 36
 
     defaultConfig {
-        applicationId = "com.castbox.tv"
+        applicationId = "com.nestcast.tv"
         minSdk = 23
         targetSdk = 36
         versionCode = 10
