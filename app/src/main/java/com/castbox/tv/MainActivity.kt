@@ -254,6 +254,8 @@ class MainActivity : ComponentActivity() {
                     PlaybackScreen(
                         movie = selected!!,
                         watch = watch, onCompleted = { reportCompleted(it) },
+                        next = remember(selected, movies) { nextEpisodeAfter(selected!!, movies) },
+                        onNext = { lastPlayedId = it.id; selected = it },
                         onBack = { player?.stop(); playingKey = ""; playingMovie = null; selected = null },
                         getPlayer = { movie ->
                             player?.release()
@@ -977,15 +979,32 @@ private const val CONTROLLER_TIMEOUT_MS = 5000
 @androidx.annotation.OptIn(UnstableApi::class)
 @OptIn(UnstableApi::class)
 @Composable
-private fun PlaybackScreen(movie: Movie, watch: WatchStore, onCompleted: (Movie) -> Unit, onBack: () -> Unit, getPlayer: (Movie) -> ExoPlayer) {
+private fun PlaybackScreen(movie: Movie, watch: WatchStore, onCompleted: (Movie) -> Unit, next: Movie?, onNext: (Movie) -> Unit, onBack: () -> Unit, getPlayer: (Movie) -> ExoPlayer) {
     val player = remember(movie.url) { getPlayer(movie) }
     var playerView by remember { mutableStateOf<PlayerView?>(null) }
     var playbackError by remember { mutableStateOf<String?>(null) }
 
     fun saveProgress() {
-        val duration = player.duration
-        if (duration != C.TIME_UNSET && watch.save(movie.watchKey, player.currentPosition, duration)) onCompleted(movie)
+        // The player may already have been released when the next episode took over.
+        runCatching {
+            val duration = player.duration
+            if (duration != C.TIME_UNSET && watch.save(movie.watchKey, player.currentPosition, duration)) onCompleted(movie)
+        }
     }
+
+    // "Next episode" appears when the credits are about to start; tapping it counts this episode as watched.
+    var showNext by remember(movie.url) { mutableStateOf(false) }
+    var nextFocused by remember { mutableStateOf(false) }
+    val nextFocus = remember { FocusRequester() }
+    LaunchedEffect(player, next) {
+        if (next == null) return@LaunchedEffect
+        while (true) {
+            delay(1000)
+            val duration = player.duration
+            showNext = duration != C.TIME_UNSET && inCreditsWindow(player.currentPosition, duration)
+        }
+    }
+    LaunchedEffect(showNext) { if (showNext) runCatching { nextFocus.requestFocus() } }
 
     // Save on the way out, so backing out by mistake doesn't lose the place.
     BackHandler { saveProgress(); onBack() }
@@ -1026,9 +1045,20 @@ private fun PlaybackScreen(movie: Movie, watch: WatchStore, onCompleted: (Movie)
 
     Box(
         Modifier.fillMaxSize().background(Color.Black).onPreviewKeyEvent { event ->
-            // Safety net: if the PlayerView still lacks focus, give it the key so the controller can appear.
             val view = playerView
-            if (view != null && !view.hasFocus() && event.type == KeyEventType.KeyDown && event.key != Key.Back) {
+            val down = event.type == KeyEventType.KeyDown
+            if (showNext && nextFocused) {
+                // Seeking keys go back to the player; OK and the rest stay with the button.
+                if (down && (event.key == Key.DirectionLeft || event.key == Key.DirectionRight)) {
+                    runCatching { playerFocus.requestFocus() }
+                    view?.requestFocus()
+                    view?.dispatchKeyEvent(event.nativeKeyEvent) ?: false
+                } else false
+            } else if (showNext && down && event.key == Key.DirectionDown) {
+                runCatching { nextFocus.requestFocus() }
+                true
+            } else if (view != null && !view.hasFocus() && down && event.key != Key.Back) {
+                // Safety net: if the PlayerView still lacks focus, give it the key so the controller can appear.
                 view.dispatchKeyEvent(event.nativeKeyEvent)
             } else false
         }
@@ -1054,6 +1084,20 @@ private fun PlaybackScreen(movie: Movie, watch: WatchStore, onCompleted: (Movie)
             },
             modifier = Modifier.fillMaxSize().background(Color.Black).focusRequester(playerFocus)
         )
+
+        if (showNext && next != null) {
+            Button(
+                onClick = {
+                    if (watch.markWatched(movie.watchKey)) onCompleted(movie)
+                    onNext(next)
+                },
+                colors = ButtonDefaults.buttonColors(containerColor = Accent, contentColor = Color(0xFF1B1B1F)),
+                modifier = Modifier.align(Alignment.BottomEnd).padding(end = 40.dp, bottom = 110.dp)
+                    .focusRequester(nextFocus).onFocusChanged { nextFocused = it.isFocused }
+            ) {
+                Text("Next episode  ▶", fontSize = 18.sp, fontWeight = FontWeight.Bold)
+            }
+        }
 
         if (playbackError != null) {
             Surface(

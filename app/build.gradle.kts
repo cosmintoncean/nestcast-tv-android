@@ -14,8 +14,8 @@ android {
         applicationId = "com.nestcast.tv"
         minSdk = 23
         targetSdk = 36
-        versionCode = 10
-        versionName = "0.9.1"
+        versionCode = 11
+        versionName = "0.9.2"
         // TV devices are ARM; skipping x86 keeps the FFmpeg native libraries from bloating the APK.
         ndk { abiFilters += listOf("armeabi-v7a", "arm64-v8a") }
         // The Support (donation) screen. Google Play restricts donation links inside apps, so the play build hides it.
