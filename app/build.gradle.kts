@@ -28,7 +28,21 @@ android {
         val file = rootProject.file("keystore.properties")
         if (file.exists()) file.inputStream().use { load(it) }
     }
+    // The key the GitHub release APK is signed with (separate from the Play upload key), so every sideloaded build updates
+    // over the previous one. Kept in keystore-sideload.properties (git-ignored); the release workflow recreates it from secrets.
+    val sideloadProperties = Properties().apply {
+        val file = rootProject.file("keystore-sideload.properties")
+        if (file.exists()) file.inputStream().use { load(it) }
+    }
     signingConfigs {
+        if (sideloadProperties.containsKey("storeFile")) {
+            create("sideload") {
+                storeFile = rootProject.file(sideloadProperties.getProperty("storeFile"))
+                storePassword = sideloadProperties.getProperty("storePassword")
+                keyAlias = sideloadProperties.getProperty("keyAlias")
+                keyPassword = sideloadProperties.getProperty("keyPassword")
+            }
+        }
         if (keystoreProperties.containsKey("storeFile")) {
             create("upload") {
                 storeFile = rootProject.file(keystoreProperties.getProperty("storeFile"))
@@ -48,6 +62,12 @@ android {
             isShrinkResources = true
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
             signingConfig = signingConfigs.getByName("debug")
+        }
+        // For the APK published on GitHub: the same optimised build (Support screen included), signed with the sideload key.
+        create("sideload") {
+            initWith(getByName("release"))
+            signingConfig = signingConfigs.findByName("sideload")
+            matchingFallbacks += "release"
         }
         // For Google Play: the same optimised build, signed with the upload key. `bundlePlay` makes the .aab to upload.
         // (The release type above stays debug-signed so a sideloaded build keeps installing over the one on the TV.)

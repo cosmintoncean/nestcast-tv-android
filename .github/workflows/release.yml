@@ -1,0 +1,59 @@
+name: Build and publish NestCast TV APK
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Check the tag matches the app version
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          name=$(grep -oP 'versionName = "\K[^"]+' app/build.gradle.kts)
+          if [ "$tag" != "$name" ]; then echo "Tag $GITHUB_REF_NAME does not match versionName $name in app/build.gradle.kts"; exit 1; fi
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Restore the sideload signing key
+        env:
+          KEYSTORE_BASE64: ${{ secrets.SIDELOAD_KEYSTORE_BASE64 }}
+          STORE_PASSWORD: ${{ secrets.SIDELOAD_STORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.SIDELOAD_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.SIDELOAD_KEY_PASSWORD }}
+        run: |
+          mkdir -p keystore
+          echo "$KEYSTORE_BASE64" | base64 --decode > keystore/nestcast-sideload.jks
+          {
+            echo "storeFile=keystore/nestcast-sideload.jks"
+            echo "storePassword=$STORE_PASSWORD"
+            echo "keyAlias=$KEY_ALIAS"
+            echo "keyPassword=$KEY_PASSWORD"
+          } > keystore-sideload.properties
+
+      - name: Build the APK
+        run: |
+          chmod +x gradlew
+          ./gradlew assembleSideload
+
+      - name: Name the APK after the version
+        run: cp app/build/outputs/apk/sideload/app-sideload.apk "NestCast-TV-${GITHUB_REF_NAME}.apk"
+
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: NestCast-TV-${{ github.ref_name }}.apk
