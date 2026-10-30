@@ -4,6 +4,14 @@ NestCast TV turns your Android TV into a big screen for the media on your own Wi
 
 It works together with **NestCast Server**, a free Windows app that shares the folders you choose. Download it from the [NestCast Server releases](https://github.com/cosmintoncean/castbox-media-server/releases/latest).
 
+## Screenshots
+
+![The first screen](docs/images/tv-first-screen.png)
+
+![Choose what to watch](docs/images/tv-home.png)
+
+![The movie library](docs/images/tv-library.png)
+
 ## Features
 
 - **One library from several PCs.** Add one or more PCs and browse their movies and shows together.
