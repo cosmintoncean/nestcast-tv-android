@@ -251,6 +251,9 @@ class MainActivity : ComponentActivity() {
                     val watching = cast as CastState.Watching
                     CastPlayerScreen(url = watching.url, title = watching.title, onClose = { cast = null })
                 } else if (selected != null) {
+                    // One fresh screen (and PlayerView) per video: reusing the old one for the next episode let the old
+                    // screen's clean-up detach the new player from the picture, leaving sound with a black screen.
+                    key(selected!!.url) {
                     PlaybackScreen(
                         movie = selected!!,
                         watch = watch, onCompleted = { reportCompleted(it) },
@@ -270,6 +273,7 @@ class MainActivity : ComponentActivity() {
                             }
                         }
                     )
+                    }
                 } else if (!isConnected || manageSources) {
                     ServerSourcesScreen(
                         servers = servers, loading = loading, error = error,
@@ -606,11 +610,6 @@ private fun ServerSourcesScreen(
                     if (onBackToLibrary != null) OutlinedButton(onClick = onBackToLibrary, modifier = Modifier.weight(1f).height(48.dp)) { Text("Cancel") }
                 }
             }
-            if (BuildConfig.SHOW_SUPPORT) OutlinedButton(onClick = { showSupport = true }, modifier = Modifier.fillMaxWidth().height(54.dp)) {
-                Icon(Icons.Outlined.Coffee, contentDescription = null, modifier = Modifier.size(20.dp))
-                Spacer(Modifier.width(8.dp))
-                Text("Support NestCast", fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
-            }
             if (error.isNotBlank() && !showAddDialog) Text(error, color = Color(0xFFFFB4A8), fontSize = 14.sp)
             HorizontalDivider(color = Color(0xFF2A2D34))
             Text("Connected PCs (${servers.size})", fontSize = 20.sp, fontWeight = FontWeight.SemiBold, color = Color.White)
@@ -627,6 +626,12 @@ private fun ServerSourcesScreen(
                         TextButton(onClick = { onRemove(server) }) { Text("Remove", color = Color(0xFFFFB4A8)) }
                     }
                 }
+            }
+            // Below the PC list: it is not what you come here for, so it must not sit between you and "Open unified library".
+            if (BuildConfig.SHOW_SUPPORT) OutlinedButton(onClick = { showSupport = true }, modifier = Modifier.fillMaxWidth().height(54.dp)) {
+                Icon(Icons.Outlined.Coffee, contentDescription = null, modifier = Modifier.size(20.dp))
+                Spacer(Modifier.width(8.dp))
+                Text("Support NestCast", fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
             }
         }
     }
@@ -972,10 +977,44 @@ private fun Modifier.onFocusChangedCompat(onChanged: (Boolean) -> Unit): Modifie
 
 private const val CONTROLLER_TIMEOUT_MS = 5000
 
+/** How long the remote must be idle before a visible "Next episode" / "Skip intro" button takes focus back. */
+private const val BUTTON_REFOCUS_MS = 3000L
+
 /**
  * Plays [movie] with the stock Media3 controller (seek bar, play/pause, subtitle and settings buttons),
  * which is built for D-pad use. The PlayerView must hold focus or the remote's keys never reach it.
  */
+/**
+ * The stock player controls are white and grey; this gives them the app's amber: the progress bar, the play/pause icon,
+ * and whichever control the D-pad is on.
+ */
+@androidx.annotation.OptIn(UnstableApi::class)
+private fun amberControls(view: PlayerView) {
+    val amber = 0xFFFFB139.toInt() // Accent
+    val white = 0xFFFFFFFF.toInt()
+    view.findViewById<androidx.media3.ui.DefaultTimeBar>(androidx.media3.ui.R.id.exo_progress)?.apply {
+        setPlayedColor(amber)
+        setScrubberColor(amber)
+        setBufferedColor(0x66FFB139)
+        setUnplayedColor(0x33FFFFFF)
+    }
+    fun tint(control: View, color: Int) {
+        // Most controls are image buttons; the rewind and fast-forward ones are buttons whose background is the icon.
+        if (control is android.widget.ImageView) control.setColorFilter(color)
+        else control.backgroundTintList = android.content.res.ColorStateList.valueOf(color)
+    }
+    val always = androidx.media3.ui.R.id.exo_play_pause
+    listOf(
+        androidx.media3.ui.R.id.exo_prev, androidx.media3.ui.R.id.exo_rew_with_amount, always,
+        androidx.media3.ui.R.id.exo_ffwd_with_amount, androidx.media3.ui.R.id.exo_next,
+        androidx.media3.ui.R.id.exo_subtitle, androidx.media3.ui.R.id.exo_settings
+    ).forEach { id ->
+        val control = view.findViewById<View>(id) ?: return@forEach
+        tint(control, if (id == always) amber else white)
+        control.setOnFocusChangeListener { _, focused -> tint(control, if (focused || id == always) amber else white) }
+    }
+}
+
 @androidx.annotation.OptIn(UnstableApi::class)
 @OptIn(UnstableApi::class)
 @Composable
@@ -984,7 +1023,10 @@ private fun PlaybackScreen(movie: Movie, watch: WatchStore, onCompleted: (Movie)
     var playerView by remember { mutableStateOf<PlayerView?>(null) }
     var playbackError by remember { mutableStateOf<String?>(null) }
 
+    // Set once the next episode is chosen: the player is released by then, and its position must not overwrite "watched".
+    var leaving by remember { mutableStateOf(false) }
     fun saveProgress() {
+        if (leaving) return
         // The player may already have been released when the next episode took over.
         runCatching {
             val duration = player.duration
@@ -1005,6 +1047,45 @@ private fun PlaybackScreen(movie: Movie, watch: WatchStore, onCompleted: (Movie)
         }
     }
     LaunchedEffect(showNext) { if (showNext) runCatching { nextFocus.requestFocus() } }
+
+    // "Skip intro" appears while the video's own chapters say an intro is playing (the PC reads them; older PCs just never answer).
+    var intro by remember { mutableStateOf<IntroRange?>(null) }
+    LaunchedEffect(movie.url) { intro = withContext(Dispatchers.IO) { fetchIntro(movie.url) } }
+    var showSkip by remember { mutableStateOf(false) }
+    var skipFocused by remember { mutableStateOf(false) }
+    val skipFocus = remember { FocusRequester() }
+    LaunchedEffect(player, intro) {
+        val range = intro ?: return@LaunchedEffect
+        while (true) {
+            showSkip = inIntro(range, player.currentPosition)
+            delay(500)
+        }
+    }
+    LaunchedEffect(showSkip) { if (showSkip) runCatching { skipFocus.requestFocus() } }
+
+    // Seeking moves focus into the player controls, and the way back to a button would be a walk past every control
+    // (subtitles and settings included). So a moment after the last key press, a visible button takes focus again.
+    val lastKeyAt = remember { longArrayOf(0L) }
+    LaunchedEffect(showNext, showSkip) {
+        if (!showNext && !showSkip) return@LaunchedEffect
+        while (true) {
+            delay(1000)
+            if (!nextFocused && !skipFocused && android.os.SystemClock.elapsedRealtime() - lastKeyAt[0] > BUTTON_REFOCUS_MS)
+                runCatching { (if (showSkip) skipFocus else nextFocus).requestFocus() }
+        }
+    }
+
+    // Both the "Next episode" button and the controller's own next button end up here. Skipping early
+    // keeps this episode's place; it only counts as watched from the credits on.
+    fun playNext(markAsWatched: Boolean) {
+        val target = next ?: return
+        if (leaving) return
+        saveProgress()
+        if (markAsWatched && watch.markWatched(movie.watchKey)) onCompleted(movie)
+        leaving = true
+        onNext(target)
+    }
+    val controllerPlayer = remember(player, next) { EpisodePlayer(player, next != null) { playNext(showNext) } }
 
     // Save on the way out, so backing out by mistake doesn't lose the place.
     BackHandler { saveProgress(); onBack() }
@@ -1047,15 +1128,16 @@ private fun PlaybackScreen(movie: Movie, watch: WatchStore, onCompleted: (Movie)
         Modifier.fillMaxSize().background(Color.Black).onPreviewKeyEvent { event ->
             val view = playerView
             val down = event.type == KeyEventType.KeyDown
-            if (showNext && nextFocused) {
+            if (down) lastKeyAt[0] = android.os.SystemClock.elapsedRealtime()
+            if ((showNext && nextFocused) || (showSkip && skipFocused)) {
                 // Seeking keys go back to the player; OK and the rest stay with the button.
                 if (down && (event.key == Key.DirectionLeft || event.key == Key.DirectionRight)) {
                     runCatching { playerFocus.requestFocus() }
                     view?.requestFocus()
                     view?.dispatchKeyEvent(event.nativeKeyEvent) ?: false
                 } else false
-            } else if (showNext && down && event.key == Key.DirectionDown) {
-                runCatching { nextFocus.requestFocus() }
+            } else if ((showNext || showSkip) && down && event.key == Key.DirectionDown) {
+                runCatching { (if (showSkip) skipFocus else nextFocus).requestFocus() }
                 true
             } else if (view != null && !view.hasFocus() && down && event.key != Key.Back) {
                 // Safety net: if the PlayerView still lacks focus, give it the key so the controller can appear.
@@ -1066,7 +1148,7 @@ private fun PlaybackScreen(movie: Movie, watch: WatchStore, onCompleted: (Movie)
         AndroidView(
             factory = { viewContext ->
                 PlayerView(viewContext).apply {
-                    this.player = player
+                    this.player = controllerPlayer
                     useController = true
                     controllerAutoShow = true
                     controllerShowTimeoutMs = CONTROLLER_TIMEOUT_MS
@@ -1076,21 +1158,35 @@ private fun PlaybackScreen(movie: Movie, watch: WatchStore, onCompleted: (Movie)
                     isFocusable = true
                     isFocusableInTouchMode = true
                     playerView = this
+                    amberControls(this)
                 }
             },
             update = { view ->
-                if (view.player !== player) view.player = player
+                if (view.player !== controllerPlayer) view.player = controllerPlayer
                 view.useController = true
             },
             modifier = Modifier.fillMaxSize().background(Color.Black).focusRequester(playerFocus)
         )
 
-        if (showNext && next != null) {
+        if (showSkip) {
             Button(
                 onClick = {
-                    if (watch.markWatched(movie.watchKey)) onCompleted(movie)
-                    onNext(next)
+                    intro?.let { player.seekTo(it.endMs) }
+                    showSkip = false
+                    runCatching { playerFocus.requestFocus() }
+                    playerView?.requestFocus()
                 },
+                colors = ButtonDefaults.buttonColors(containerColor = Accent, contentColor = Color(0xFF1B1B1F)),
+                modifier = Modifier.align(Alignment.BottomEnd).padding(end = 40.dp, bottom = 110.dp)
+                    .focusRequester(skipFocus).onFocusChanged { skipFocused = it.isFocused }
+            ) {
+                Text("Skip intro  ▶▶", fontSize = 18.sp, fontWeight = FontWeight.Bold)
+            }
+        }
+
+        if (showNext && next != null) {
+            Button(
+                onClick = { playNext(markAsWatched = true) },
                 colors = ButtonDefaults.buttonColors(containerColor = Accent, contentColor = Color(0xFF1B1B1F)),
                 modifier = Modifier.align(Alignment.BottomEnd).padding(end = 40.dp, bottom = 110.dp)
                     .focusRequester(nextFocus).onFocusChanged { nextFocused = it.isFocused }

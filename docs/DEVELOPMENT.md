@@ -68,7 +68,8 @@ Server URLs are entered on the TV (`http://<PC address>:<port>`, default port 50
 ## Layout
 
 - `app/src/main/java/com/castbox/tv/MainActivity.kt`: activity, library, folder tree, playback screen.
-- `NextEpisode.kt`: finds the next episode in a folder and decides when the credits window starts.
+- `NextEpisode.kt`: finds the next episode in a folder and decides when the credits window starts. It also has `EpisodePlayer`, which makes the controller's own next button play the next episode.
+- `SkipIntro.kt`: asks the server for a video's intro (`GET /api/media/{id}/intro`) and decides when the "Skip intro" button shows.
 - `WatchStore.kt`, `WatchReporter.kt`: resume positions and watched state; reporting finished videos to the PC.
 - `PersonalScreens.kt`, `CastScreens.kt`, `SupportScreen.kt`, `WhoIsWatching.kt`, `PosterRepo.kt`: the other screens and the TVmaze poster lookup.
 - `branding/`: icon and Play Store artwork sources.

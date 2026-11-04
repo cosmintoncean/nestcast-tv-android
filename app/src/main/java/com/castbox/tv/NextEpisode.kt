@@ -33,6 +33,22 @@ fun nextEpisodeAfter(current: Movie, all: List<Movie>): Movie? {
     return if (index >= 0) siblings.getOrNull(index + 1) else null
 }
 
+/**
+ * Wraps the real player for the on-screen controller only. The controller's "next" button is greyed out for a
+ * single video; this makes it available when there is a next episode and sends it to [onNext].
+ */
+class EpisodePlayer(player: androidx.media3.common.Player, private val hasNext: Boolean, private val onNext: () -> Unit) :
+    androidx.media3.common.ForwardingPlayer(player) {
+    override fun getAvailableCommands(): androidx.media3.common.Player.Commands =
+        if (hasNext) super.getAvailableCommands().buildUpon().add(androidx.media3.common.Player.COMMAND_SEEK_TO_NEXT).build()
+        else super.getAvailableCommands()
+    override fun isCommandAvailable(command: Int): Boolean =
+        (hasNext && command == androidx.media3.common.Player.COMMAND_SEEK_TO_NEXT) || super.isCommandAvailable(command)
+    override fun hasNextMediaItem(): Boolean = hasNext || super.hasNextMediaItem()
+    override fun seekToNext() { if (hasNext) onNext() else super.seekToNext() }
+    override fun seekToNextMediaItem() { if (hasNext) onNext() else super.seekToNextMediaItem() }
+}
+
 /** True from [NEXT_EPISODE_LEAD_MS] before the end of a long enough video. */
 fun inCreditsWindow(positionMs: Long, durationMs: Long): Boolean =
     durationMs >= MIN_EPISODE_DURATION_MS && positionMs >= 0 && durationMs - positionMs <= NEXT_EPISODE_LEAD_MS

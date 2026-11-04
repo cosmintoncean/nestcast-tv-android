@@ -17,6 +17,7 @@ It works together with **NestCast Server**, a free Windows app that shares the f
 - **One library from several PCs.** Add one or more PCs and browse their movies and shows together.
 - **Pick up where you left off.** NestCast remembers how far you got in each video and shows what you have watched.
 - **Next episode.** Near the end of an episode, a button starts the next one and marks the current one as watched.
+- **Skip intro.** When a video has an intro chapter (named Intro, Opening, OP and the like), a button skips past it. This needs a NestCast Server that supports it, and it only works for videos that carry chapters.
 - **Posters for your shows**, found automatically from folder names.
 - **Personal pictures and videos.** Browse your own photo and video folders in a separate section, with a full-screen photo viewer. Large collections open quickly.
 - **Cast your PC screen** to the TV, with sound. Your PC asks for permission before anything is shared.
